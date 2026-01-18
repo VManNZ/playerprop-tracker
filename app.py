@@ -26,7 +26,9 @@ except Exception as e:
 
 SPORT = 'basketball_nba'
 SNAPSHOT_FILENAME = 'nba_odds_snapshot.json'
-TARGET_BOOKMAKER_KEY = 'betonlineag' 
+
+# 👇 UPDATED TARGET BOOKMAKER
+TARGET_BOOKMAKER_KEY = 'betmgm' 
 
 # Custom Sort Order
 MARKET_ORDER = [
@@ -151,7 +153,6 @@ def flatten_data(game_data_list):
             for market in book.get('markets', []):
                 for outcome in market.get('outcomes', []):
                     # Only grab one outcome (e.g., Over) to represent the line
-                    # We will find the prices for Over/Under from the list
                     if outcome['name'] == 'Over':
                         over_price = outcome['price']
                         # Find matching Under
@@ -170,7 +171,7 @@ def flatten_data(game_data_list):
 
 # --- APP LAYOUT ---
 st.set_page_config(page_title="NBA Tracker + Drive", page_icon="☁️", layout="wide")
-st.title("☁️ NBA Tracker (Synced to Drive)")
+st.title("☁️ NBA Tracker (BetMGM)")
 
 # Sidebar
 st.sidebar.header("⚙️ Controls")
