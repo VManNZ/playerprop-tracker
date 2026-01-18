@@ -28,7 +28,7 @@ SPORT = 'basketball_nba'
 SNAPSHOT_FILENAME = 'nba_odds_snapshot.json'
 TARGET_BOOKMAKER_KEY = 'betonlineag' 
 
-# 👇 DEFINING YOUR CUSTOM SORT ORDER
+# Custom Sort Order
 MARKET_ORDER = [
     'player_points',
     'player_rebounds',
@@ -109,9 +109,7 @@ def get_active_games():
     return []
 
 def get_props_for_game(game_id):
-    # Requesting all 7 markets
     market_list = ','.join(MARKET_ORDER)
-    
     url = f'https://api.the-odds-api.com/v4/sports/{SPORT}/events/{game_id}/odds'
     params = {
         'apiKey': API_KEY,
@@ -140,6 +138,35 @@ def fetch_all_nba_data():
         progress_bar.empty()
         status_text.empty()
     return all_data
+
+# --- HELPER: FLATTEN DATA ---
+def flatten_data(game_data_list):
+    """Converts the complex API response into a flat list of props."""
+    flat_list = []
+    if not game_data_list: return flat_list
+    
+    for game in game_data_list:
+        for book in game.get('bookmakers', []):
+            if book['key'] != TARGET_BOOKMAKER_KEY: continue
+            for market in book.get('markets', []):
+                for outcome in market.get('outcomes', []):
+                    # Only grab one outcome (e.g., Over) to represent the line
+                    # We will find the prices for Over/Under from the list
+                    if outcome['name'] == 'Over':
+                        over_price = outcome['price']
+                        # Find matching Under
+                        under_outcome = next((o for o in market['outcomes'] if o['name'] == 'Under'), None)
+                        under_price = under_outcome['price'] if under_outcome else '-'
+                        
+                        flat_list.append({
+                            "player": outcome['description'],
+                            "market_key": market['key'],
+                            "line": outcome['point'],
+                            "over": over_price,
+                            "under": under_price,
+                            "book": book['title']
+                        })
+    return flat_list
 
 # --- APP LAYOUT ---
 st.set_page_config(page_title="NBA Tracker + Drive", page_icon="☁️", layout="wide")
@@ -175,6 +202,7 @@ elif mode == "🔎 Player Search":
 
 if st.button("🚀 2. Compare Live Data"):
     
+    # 1. LOAD SNAPSHOT (Required)
     with st.spinner("Loading Snapshot..."):
         ts, pre_game_data = load_snapshot_from_drive()
     
@@ -182,82 +210,84 @@ if st.button("🚀 2. Compare Live Data"):
         st.error("⚠️ No snapshot data found.")
         st.stop()
 
+    # 2. FETCH LIVE (Optional for Search Mode)
     with st.spinner("Fetching Live Odds..."):
         live_data = fetch_all_nba_data()
 
     if not live_data:
-        st.error("No live games found.")
-        st.stop()
+        st.warning("⚠️ No live games active. Showing Snapshot data only.")
 
-    # --- 1. BUILD PRE-GAME MAP ---
-    # Key: "Player Name | Market Key" -> Value: Point (Line)
-    pre_map = {}
-    for game in pre_game_data:
-        for book in game.get('bookmakers', []):
-            if book['key'] != TARGET_BOOKMAKER_KEY: continue
-            for market in book.get('markets', []):
-                for outcome in market.get('outcomes', []):
-                    # We only need the line from one side (Over) to know the pre-game line
-                    unique_key = f"{outcome['description']}|{market['key']}"
-                    pre_map[unique_key] = outcome.get('point')
-
-    # --- 2. SCAN LIVE DATA & COLLECT RESULTS ---
+    # 3. PREPARE DATA LOOKUPS
+    pre_flat = flatten_data(pre_game_data)
+    live_flat = flatten_data(live_data)
+    
+    # Create Dictionaries for fast matching: Key = "PlayerName|MarketKey"
+    pre_map = {f"{x['player']}|{x['market_key']}": x for x in pre_flat}
+    live_map = {f"{x['player']}|{x['market_key']}": x for x in live_flat}
+    
     results_list = []
 
-    for game in live_data:
-        for book in game.get('bookmakers', []):
-            if book['key'] != TARGET_BOOKMAKER_KEY: continue
+    # --- LOGIC BRANCH A: SCANNER MODE ---
+    # Only checks active live lines
+    if mode == "🔥 Market Scanner":
+        if not live_flat:
+            st.error("Scanner requires live games. None found.")
+            st.stop()
             
-            for market in book.get('markets', []):
-                market_key = market['key']
-                outcomes = market.get('outcomes', [])
-                
-                # We need at least one outcome to get the player name & line
-                if not outcomes: continue
-                
-                player_name = outcomes[0]['description']
-                live_line = outcomes[0].get('point')
-                
-                # Check Filter: Player Search
-                if mode == "🔎 Player Search" and search_query.lower() not in player_name.lower():
-                    continue
+        for key, live_item in live_map.items():
+            if key in pre_map:
+                pre_item = pre_map[key]
+                if live_item['line'] is not None and pre_item['line'] is not None:
+                    diff = live_item['line'] - pre_item['line']
+                    
+                    if abs(diff) >= threshold:
+                        results_list.append({
+                            **live_item,
+                            "live_display": live_item['line'],
+                            "pre_display": pre_item['line'],
+                            "diff": diff,
+                            "status": "active"
+                        })
 
-                # Check Pre-Game Comparison
-                unique_key = f"{player_name}|{market_key}"
-                pre_line = pre_map.get(unique_key)
+    # --- LOGIC BRANCH B: SEARCH MODE ---
+    # Checks Snapshot FIRST, then fills in Live data if available
+    elif mode == "🔎 Player Search":
+        if not search_query:
+            st.warning("Please enter a player name.")
+            st.stop()
+
+        for key, pre_item in pre_map.items():
+            if search_query.lower() in pre_item['player'].lower():
                 
-                if pre_line is not None and live_line is not None:
-                    line_diff = live_line - pre_line
-                    
-                    # Check Filter: Threshold
-                    if mode == "🔥 Market Scanner" and abs(line_diff) < threshold:
-                        continue
-                    
-                    # Get Odds for Over/Under
-                    over_price = next((o['price'] for o in outcomes if o['name'] == 'Over'), '-')
-                    under_price = next((o['price'] for o in outcomes if o['name'] == 'Under'), '-')
-                    
-                    # Add to list for sorting
+                # Check if this prop exists in Live Data
+                if key in live_map:
+                    live_item = live_map[key]
+                    diff = live_item['line'] - pre_item['line']
                     results_list.append({
-                        "player": player_name,
-                        "market_key": market_key,
-                        "live_line": live_line,
-                        "pre_line": pre_line,
-                        "diff": line_diff,
-                        "over": over_price,
-                        "under": under_price,
-                        "book": book['title']
+                        **live_item,
+                        "live_display": live_item['line'],
+                        "pre_display": pre_item['line'],
+                        "diff": diff,
+                        "status": "active"
+                    })
+                else:
+                    # Not found live -> Show Pre-Game Only
+                    results_list.append({
+                        **pre_item,
+                        "live_display": "No Live Game",
+                        "pre_display": pre_item['line'],
+                        "diff": 0,
+                        "status": "inactive"
                     })
 
-    # --- 3. SORT & DISPLAY ---
+    # --- 4. DISPLAY RESULTS ---
     if not results_list:
         st.info("No records found.")
     else:
         st.subheader(f"Results ({len(results_list)})")
         if ts: st.caption(f"Comparing against snapshot from: {ts}")
         
-        # Sort Logic: First by Player Name, THEN by your Custom Market Order
-        # We use the index in MARKET_ORDER to determine rank (0 to 6)
+        # Sort by Player Name -> Then by Market Order
         results_list.sort(key=lambda x: (
             x['player'], 
             MARKET_ORDER.index(x['market_key']) if x['market_key'] in MARKET_ORDER else 99
@@ -275,17 +305,20 @@ if st.button("🚀 2. Compare Live Data"):
                 elif m_key == 'player_points_rebounds_assists': pretty_market = "Pts + Rebs + Asts"
                 else: pretty_market = m_key.replace('player_', '').replace('_', ' ').title()
 
-                # Column 1: Name & Market
                 col1.markdown(f"**{item['player']}**")
                 col1.caption(f"{pretty_market}")
                 
-                # Column 2: The Lines (With Delta)
-                col2.metric("Live Line", f"{item['live_line']}", delta=f"{item['diff']:.1f}")
+                # Live Column (Handle "No Live Game")
+                if item['status'] == 'inactive':
+                    col2.metric("Live Line", "N/A", delta=None)
+                    col2.caption("No Live Game")
+                else:
+                    col2.metric("Live Line", f"{item['live_display']}", delta=f"{item['diff']:.1f}")
                 
-                # Column 3: Pre-Game Reference
-                col3.metric("Pre Line", f"{item['pre_line']}")
+                # Pre Column
+                col3.metric("Pre Line", f"{item['pre_display']}")
                 
-                # Column 4: Combined Odds
+                # Odds Column
                 col4.write(f"**Over:** {item['over']}")
                 col4.write(f"**Under:** {item['under']}")
                 
