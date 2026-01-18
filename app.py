@@ -26,7 +26,8 @@ except Exception as e:
 
 SPORT = 'basketball_nba'
 SNAPSHOT_FILENAME = 'nba_odds_snapshot.json'
-TARGET_BOOKMAKER_KEY = 'fanduel' 
+# 👇 UPDATED TO DRAFTKINGS
+TARGET_BOOKMAKER_KEY = 'draftkings' 
 
 MARKET_ORDER = [
     'player_points', 'player_rebounds', 'player_assists',
@@ -39,10 +40,12 @@ def get_drive_service():
     return build('drive', 'v3', credentials=GCP_CREDS)
 
 def get_snapshot_file_id(service):
+    """Finds the most recent snapshot file."""
     query = f"'{DRIVE_FOLDER_ID}' in parents and name = '{SNAPSHOT_FILENAME}' and trashed = false"
     results = service.files().list(q=query, orderBy='modifiedTime desc', fields="files(id, name, modifiedTime)").execute()
     files = results.get('files', [])
     if not files: return None, 0
+    if len(files) > 1: st.toast(f"⚠️ Found {len(files)} duplicate files. Using newest.", icon="⚠️")
     return files[0]['id'], len(files)
 
 def save_snapshot_to_drive(data):
@@ -62,6 +65,7 @@ def save_snapshot_to_drive(data):
             file_metadata = {'name': SNAPSHOT_FILENAME, 'parents': [DRIVE_FOLDER_ID]}
             service.files().create(body=file_metadata, media_body=media).execute()
             return f"Created new snapshot ({timestamp})"
+            
     except HttpError as error:
         st.error(f"🛑 Google Drive Error: {error.content.decode('utf-8')}")
         return None
@@ -74,15 +78,19 @@ def load_snapshot_from_drive():
         service = get_drive_service()
         file_id, count = get_snapshot_file_id(service)
         if not file_id: return None, None
+
         request = service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
         done = False
         while done is False: status, done = downloader.next_chunk()
         fh.seek(0)
+        
         content = json.load(fh)
-        if isinstance(content, list): return "No Data (Blank File)", content
+        if isinstance(content, list): 
+            return "No Data (Blank File)", content
         return content.get("last_updated"), content.get("games")
+        
     except Exception as e:
         st.error(f"Error loading from Drive: {e}")
         return None, None
@@ -95,11 +103,9 @@ def get_active_games():
     try:
         response = requests.get(url, params=params)
         
-        # 🕵️ DIAGNOSTIC: Check Headers
         if 'x-requests-remaining' in response.headers:
             remaining = response.headers['x-requests-remaining']
             used = response.headers.get('x-requests-used', '?')
-            # Save to session state to display in sidebar
             st.session_state['api_remaining'] = remaining
             st.session_state['api_used'] = used
         
@@ -133,12 +139,11 @@ def fetch_all_nba_data():
     games = get_active_games()
     
     if not games:
-        # Check if we captured the credit limit
         rem = st.session_state.get('api_remaining', 'Unknown')
         if rem == '0':
             st.error("🚨 YOU ARE OUT OF CREDITS! The API blocked the request.")
         else:
-            st.warning("⚠️ API returned 0 games, but you still have credits. Likely no games scheduled/listed.")
+            st.warning("⚠️ API returned 0 games. Likely no games scheduled.")
         return []
 
     if games:
@@ -178,8 +183,8 @@ def flatten_data(game_data_list):
     return flat_list, found_bookies
 
 # --- APP LAYOUT ---
-st.set_page_config(page_title="NBA Tracker + Drive", page_icon="☁️", layout="wide")
-st.title("☁️ NBA Tracker (FanDuel)")
+st.set_page_config(page_title="NBA Tracker", page_icon="☁️", layout="wide")
+st.title("☁️ NBA Tracker")
 
 # Sidebar
 st.sidebar.header("⚙️ Controls")
@@ -305,3 +310,7 @@ if st.button("🚀 2. Compare Live Data"):
                 col4.write(f"**Over:** {item['over']}")
                 col4.write(f"**Under:** {item['under']}")
                 st.divider()
+
+    with st.expander("🛠️ Debug Information"):
+        st.write(f"**Target Bookmaker:** `{TARGET_BOOKMAKER_KEY}`")
+        st.write(f"**Snapshot Data Size:** {len(pre_flat)} props")
