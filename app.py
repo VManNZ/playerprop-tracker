@@ -39,19 +39,12 @@ def get_drive_service():
     return build('drive', 'v3', credentials=GCP_CREDS)
 
 def get_snapshot_file_id(service):
-    """Finds the most recent snapshot file. Warns if duplicates exist."""
+    """Finds the most recent snapshot file."""
     query = f"'{DRIVE_FOLDER_ID}' in parents and name = '{SNAPSHOT_FILENAME}' and trashed = false"
-    # Order by modifiedTime descending so we always get the newest one first
     results = service.files().list(q=query, orderBy='modifiedTime desc', fields="files(id, name, modifiedTime)").execute()
     files = results.get('files', [])
-    
-    if not files:
-        return None, 0
-    
-    # Check for duplicates
-    if len(files) > 1:
-        st.toast(f"⚠️ Found {len(files)} files named '{SNAPSHOT_FILENAME}'. Using the newest one.", icon="⚠️")
-        
+    if not files: return None, 0
+    if len(files) > 1: st.toast(f"⚠️ Found {len(files)} duplicate files. Using newest.", icon="⚠️")
     return files[0]['id'], len(files)
 
 def save_snapshot_to_drive(data):
@@ -61,16 +54,13 @@ def save_snapshot_to_drive(data):
         payload = {"last_updated": timestamp, "games": data}
         
         file_id, count = get_snapshot_file_id(service)
-        
         file_content = json.dumps(payload)
         media = MediaIoBaseUpload(io.BytesIO(file_content.encode('utf-8')), mimetype='application/json')
         
         if file_id:
-            # Update existing file
             service.files().update(fileId=file_id, media_body=media).execute()
             return f"Updated snapshot ({timestamp})"
         else:
-            # Create new file (Only if one doesn't exist)
             file_metadata = {'name': SNAPSHOT_FILENAME, 'parents': [DRIVE_FOLDER_ID]}
             service.files().create(body=file_metadata, media_body=media).execute()
             return f"Created new snapshot ({timestamp})"
@@ -86,19 +76,19 @@ def load_snapshot_from_drive():
     try:
         service = get_drive_service()
         file_id, count = get_snapshot_file_id(service)
-        
         if not file_id: return None, None
 
         request = service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
         done = False
-        while done is False:
-            status, done = downloader.next_chunk()
+        while done is False: status, done = downloader.next_chunk()
         fh.seek(0)
         
         content = json.load(fh)
-        if isinstance(content, list): return "Old Format", content
+        # Handle "Blank File" list [] gracefully
+        if isinstance(content, list): 
+            return "No Data (Blank File)", content
         return content.get("last_updated"), content.get("games")
         
     except Exception as e:
@@ -132,16 +122,24 @@ def get_props_for_game(game_id):
 def fetch_all_nba_data():
     all_data = []
     games = get_active_games()
+    
+    # 🛑 DEBUG: Check if games exist at all
+    if not games:
+        st.error("⚠️ API returned 0 active games. (Are there games scheduled today?)")
+        return []
+
     if games:
         status_text = st.empty()
         progress_bar = st.progress(0)
         for i, game in enumerate(games):
             status_text.text(f"Scanning {game['home_team']} vs {game['away_team']}...")
             game_props = get_props_for_game(game['id'])
-            if game_props: all_data.append(game_props)
+            if game_props: 
+                all_data.append(game_props)
             progress_bar.progress((i + 1) / len(games))
         progress_bar.empty()
         status_text.empty()
+        
     return all_data
 
 def flatten_data(game_data_list):
@@ -160,11 +158,8 @@ def flatten_data(game_data_list):
                         under_outcome = next((o for o in market['outcomes'] if o['name'] == 'Under'), None)
                         under_price = under_outcome['price'] if under_outcome else '-'
                         flat_list.append({
-                            "player": outcome['description'],
-                            "market_key": market['key'],
-                            "line": outcome['point'],
-                            "over": over_price,
-                            "under": under_price,
+                            "player": outcome['description'], "market_key": market['key'],
+                            "line": outcome['point'], "over": over_price, "under": under_price,
                             "book": book['title']
                         })
     return flat_list, found_bookies
@@ -177,14 +172,19 @@ st.title("☁️ NBA Tracker (FanDuel)")
 st.sidebar.header("⚙️ Controls")
 
 if st.sidebar.button("📸 1. Take Pre-Game Snapshot"):
-    with st.spinner("Fetching odds & Syncing to Drive..."):
+    with st.spinner("Fetching odds..."):
         data = fetch_all_nba_data()
+        
         if data:
-            msg = save_snapshot_to_drive(data)
-            if msg: st.sidebar.success(f"{msg}")
-            # Increase sleep to ensure Drive API propagation
-            time.sleep(2) 
-            st.rerun() 
+            with st.spinner("Syncing to Drive..."):
+                msg = save_snapshot_to_drive(data)
+                if msg: st.sidebar.success(f"{msg}")
+                time.sleep(2) 
+                st.rerun()
+        else:
+            # 🛑 ERROR ALERT IF NO DATA FOUND
+            st.sidebar.error("❌ Scan failed: No odds found for FanDuel.")
+            st.sidebar.warning("Possible reasons:\n1. No games today.\n2. Odds not released yet.\n3. API Key limit reached.")
 
 # LOAD TIMESTAMP
 try:
@@ -222,9 +222,8 @@ if st.button("🚀 2. Compare Live Data"):
     
     if not pre_flat:
         st.error(f"❌ Your snapshot is empty for '{TARGET_BOOKMAKER_KEY}'!")
-        if pre_bookies:
-            st.warning(f"Found data for these bookies instead: {', '.join(pre_bookies)}")
-        st.info("💡 FIX: Click 'Take Pre-Game Snapshot' in the sidebar to overwrite the old data.")
+        if pre_bookies: st.warning(f"Found data for: {', '.join(pre_bookies)}")
+        st.info("💡 FIX: Click 'Take Pre-Game Snapshot' in the sidebar.")
         st.stop()
 
     pre_map = {f"{x['player']}|{x['market_key']}": x for x in pre_flat}
@@ -257,7 +256,7 @@ if st.button("🚀 2. Compare Live Data"):
                     results_list.append({**live_item, "live_display": live_item['line'], "pre_display": pre_item['line'], "diff": diff, "status": "active"})
                 else:
                     results_list.append({**pre_item, "live_display": "No Live Game", "pre_display": pre_item['line'], "diff": 0, "status": "inactive"})
-        if not found_match: st.warning(f"No player found matching '{search_query}'. (Checked {len(pre_map)} total records).")
+        if not found_match: st.warning(f"No player found matching '{search_query}'.")
 
     if not results_list:
         st.info("No records found.")
@@ -290,5 +289,4 @@ if st.button("🚀 2. Compare Live Data"):
 
     with st.expander("🛠️ Debug Information"):
         st.write(f"**Target Bookmaker:** `{TARGET_BOOKMAKER_KEY}`")
-        st.write(f"**Pre-Game Props:** {len(pre_flat)}")
-        if pre_bookies: st.write(f"**Snapshot Bookies:** {list(pre_bookies)}")
+        st.write(f"**Snapshot Data Size:** {len(pre_flat)} props")
