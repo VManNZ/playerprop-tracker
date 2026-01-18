@@ -16,7 +16,6 @@ try:
     DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]
     gcp_info = json.loads(st.secrets["GCP_JSON"])
     
-    # Authenticate with Drive Scope
     SCOPES = ['https://www.googleapis.com/auth/drive']
     GCP_CREDS = service_account.Credentials.from_service_account_info(
         gcp_info, scopes=SCOPES
@@ -29,23 +28,27 @@ SPORT = 'basketball_nba'
 SNAPSHOT_FILENAME = 'nba_odds_snapshot.json'
 TARGET_BOOKMAKER_KEY = 'betonlineag' 
 
+# 👇 DEFINING YOUR CUSTOM SORT ORDER
+MARKET_ORDER = [
+    'player_points',
+    'player_rebounds',
+    'player_assists',
+    'player_points_rebounds_assists',
+    'player_points_rebounds',
+    'player_points_assists',
+    'player_rebounds_assists'
+]
+
 # --- GOOGLE DRIVE FUNCTIONS ---
 def get_drive_service():
     return build('drive', 'v3', credentials=GCP_CREDS)
 
 def save_snapshot_to_drive(data):
-    """Uploads the JSON data + Timestamp to Google Drive."""
     try:
         service = get_drive_service()
-        
-        # 1. Wrap data with Timestamp
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
-        payload = {
-            "last_updated": timestamp,
-            "games": data
-        }
+        payload = {"last_updated": timestamp, "games": data}
         
-        # 2. Check for existing file
         query = f"'{DRIVE_FOLDER_ID}' in parents and name = '{SNAPSHOT_FILENAME}' and trashed = false"
         results = service.files().list(q=query, fields="files(id)").execute()
         files = results.get('files', [])
@@ -63,15 +66,13 @@ def save_snapshot_to_drive(data):
             return f"Created new snapshot ({timestamp})"
             
     except HttpError as error:
-        error_reason = error.content.decode('utf-8')
-        st.error(f"🛑 Google Drive Error: {error_reason}")
+        st.error(f"🛑 Google Drive Error: {error.content.decode('utf-8')}")
         return None
     except Exception as e:
         st.error(f"🛑 Unexpected Error: {e}")
         return None
 
 def load_snapshot_from_drive():
-    """Downloads data and extracts timestamp."""
     try:
         service = get_drive_service()
         query = f"'{DRIVE_FOLDER_ID}' in parents and name = '{SNAPSHOT_FILENAME}' and trashed = false"
@@ -90,10 +91,7 @@ def load_snapshot_from_drive():
         fh.seek(0)
         
         content = json.load(fh)
-        
-        if isinstance(content, list):
-            return "Old Format (Please Retake Snapshot)", content
-            
+        if isinstance(content, list): return "Old Format", content
         return content.get("last_updated"), content.get("games")
         
     except Exception as e:
@@ -111,12 +109,8 @@ def get_active_games():
     return []
 
 def get_props_for_game(game_id):
-    # 👇 EXPLICITLY REQUESTING ALL 7 MARKETS
-    market_list = (
-        'player_points,player_rebounds,player_assists,'             # The 3 Singles
-        'player_points_rebounds_assists,player_points_rebounds,'    # Combo 1 & 2
-        'player_points_assists,player_rebounds_assists'             # Combo 3 & 4
-    )
+    # Requesting all 7 markets
+    market_list = ','.join(MARKET_ORDER)
     
     url = f'https://api.the-odds-api.com/v4/sports/{SPORT}/events/{game_id}/odds'
     params = {
@@ -154,7 +148,6 @@ st.title("☁️ NBA Tracker (Synced to Drive)")
 # Sidebar
 st.sidebar.header("⚙️ Controls")
 
-# 1. SNAPSHOT BUTTON
 if st.sidebar.button("📸 1. Take Pre-Game Snapshot"):
     with st.spinner("Fetching odds & Syncing to Drive..."):
         data = fetch_all_nba_data()
@@ -164,15 +157,11 @@ if st.sidebar.button("📸 1. Take Pre-Game Snapshot"):
             time.sleep(1) 
             st.rerun() 
 
-# 2. LOAD TIMESTAMP
 try:
     last_ts, _ = load_snapshot_from_drive()
-    if last_ts:
-        st.sidebar.info(f"🕒 Snapshot: {last_ts}")
-    else:
-        st.sidebar.warning("⚠️ No Snapshot found")
-except:
-    pass
+    if last_ts: st.sidebar.info(f"🕒 Snapshot: {last_ts}")
+    else: st.sidebar.warning("⚠️ No Snapshot found")
+except: pass
 
 st.sidebar.write("---")
 mode = st.sidebar.radio("View Mode", ["🔥 Market Scanner", "🔎 Player Search"])
@@ -184,14 +173,13 @@ if mode == "🔥 Market Scanner":
 elif mode == "🔎 Player Search":
     search_query = st.text_input("Enter Player Name", "")
 
-# 3. COMPARE BUTTON
 if st.button("🚀 2. Compare Live Data"):
     
-    with st.spinner("Loading Snapshot from Google Drive..."):
+    with st.spinner("Loading Snapshot..."):
         ts, pre_game_data = load_snapshot_from_drive()
     
     if not pre_game_data:
-        st.error("⚠️ No snapshot data found! Please take a snapshot.")
+        st.error("⚠️ No snapshot data found.")
         st.stop()
 
     with st.spinner("Fetching Live Odds..."):
@@ -201,59 +189,104 @@ if st.button("🚀 2. Compare Live Data"):
         st.error("No live games found.")
         st.stop()
 
-    # --- COMPARISON LOGIC ---
-    st.subheader(f"Results")
-    if ts: st.caption(f"Comparing against snapshot from: {ts}")
-    
-    found_movers = False
-    
+    # --- 1. BUILD PRE-GAME MAP ---
+    # Key: "Player Name | Market Key" -> Value: Point (Line)
     pre_map = {}
     for game in pre_game_data:
         for book in game.get('bookmakers', []):
             if book['key'] != TARGET_BOOKMAKER_KEY: continue
             for market in book.get('markets', []):
                 for outcome in market.get('outcomes', []):
-                    unique_key = f"{outcome['description']}|{market['key']}|{outcome['name']}"
+                    # We only need the line from one side (Over) to know the pre-game line
+                    unique_key = f"{outcome['description']}|{market['key']}"
                     pre_map[unique_key] = outcome.get('point')
+
+    # --- 2. SCAN LIVE DATA & COLLECT RESULTS ---
+    results_list = []
 
     for game in live_data:
         for book in game.get('bookmakers', []):
             if book['key'] != TARGET_BOOKMAKER_KEY: continue
+            
             for market in book.get('markets', []):
-                for outcome in market.get('outcomes', []):
-                    
-                    if mode == "🔎 Player Search" and search_query.lower() not in outcome['description'].lower(): continue
-                    
-                    unique_key = f"{outcome['description']}|{market['key']}|{outcome['name']}"
-                    
-                    if unique_key in pre_map:
-                        pre_line = pre_map[unique_key]
-                        live_line = outcome.get('point')
-                        if pre_line is not None and live_line is not None:
-                            line_diff = live_line - pre_line
-                            
-                            if mode == "🔥 Market Scanner" and abs(line_diff) < threshold: continue
-                            
-                            found_movers = True
-                            
-                            with st.container():
-                                col1, col2, col3, col4 = st.columns([2, 1.5, 1, 1])
-                                
-                                # 👇 PRETTY PRINTING THE COMBO MARKETS
-                                market_key = market['key']
-                                if market_key == 'player_points_assists': pretty_market = "Pts + Asts"
-                                elif market_key == 'player_points_rebounds': pretty_market = "Pts + Rebs"
-                                elif market_key == 'player_rebounds_assists': pretty_market = "Rebs + Asts"
-                                elif market_key == 'player_points_rebounds_assists': pretty_market = "Pts + Rebs + Asts"
-                                else: pretty_market = market_key.replace('player_', '').replace('_', ' ').title()
+                market_key = market['key']
+                outcomes = market.get('outcomes', [])
+                
+                # We need at least one outcome to get the player name & line
+                if not outcomes: continue
+                
+                player_name = outcomes[0]['description']
+                live_line = outcomes[0].get('point')
+                
+                # Check Filter: Player Search
+                if mode == "🔎 Player Search" and search_query.lower() not in player_name.lower():
+                    continue
 
-                                col1.markdown(f"**{outcome['description']}**")
-                                col1.caption(f"{pretty_market} ({outcome['name']})")
-                                col2.write(f"🏦 {book['title']}")
-                                col3.metric("Live Line", f"{live_line}", delta=f"{line_diff:.1f}")
-                                col4.metric("Pre Line", f"{pre_line}")
-                                st.caption(f"Odds: {outcome['price']}")
-                                st.divider()
+                # Check Pre-Game Comparison
+                unique_key = f"{player_name}|{market_key}"
+                pre_line = pre_map.get(unique_key)
+                
+                if pre_line is not None and live_line is not None:
+                    line_diff = live_line - pre_line
+                    
+                    # Check Filter: Threshold
+                    if mode == "🔥 Market Scanner" and abs(line_diff) < threshold:
+                        continue
+                    
+                    # Get Odds for Over/Under
+                    over_price = next((o['price'] for o in outcomes if o['name'] == 'Over'), '-')
+                    under_price = next((o['price'] for o in outcomes if o['name'] == 'Under'), '-')
+                    
+                    # Add to list for sorting
+                    results_list.append({
+                        "player": player_name,
+                        "market_key": market_key,
+                        "live_line": live_line,
+                        "pre_line": pre_line,
+                        "diff": line_diff,
+                        "over": over_price,
+                        "under": under_price,
+                        "book": book['title']
+                    })
 
-    if not found_movers:
-        st.info("No records found matching your criteria.")
+    # --- 3. SORT & DISPLAY ---
+    if not results_list:
+        st.info("No records found.")
+    else:
+        st.subheader(f"Results ({len(results_list)})")
+        if ts: st.caption(f"Comparing against snapshot from: {ts}")
+        
+        # Sort Logic: First by Player Name, THEN by your Custom Market Order
+        # We use the index in MARKET_ORDER to determine rank (0 to 6)
+        results_list.sort(key=lambda x: (
+            x['player'], 
+            MARKET_ORDER.index(x['market_key']) if x['market_key'] in MARKET_ORDER else 99
+        ))
+
+        for item in results_list:
+            with st.container():
+                col1, col2, col3, col4 = st.columns([2, 1.5, 1.5, 1])
+                
+                # Pretty Market Name
+                m_key = item['market_key']
+                if m_key == 'player_points_assists': pretty_market = "Points + Assists"
+                elif m_key == 'player_points_rebounds': pretty_market = "Points + Rebounds"
+                elif m_key == 'player_rebounds_assists': pretty_market = "Rebounds + Assists"
+                elif m_key == 'player_points_rebounds_assists': pretty_market = "Pts + Rebs + Asts"
+                else: pretty_market = m_key.replace('player_', '').replace('_', ' ').title()
+
+                # Column 1: Name & Market
+                col1.markdown(f"**{item['player']}**")
+                col1.caption(f"{pretty_market}")
+                
+                # Column 2: The Lines (With Delta)
+                col2.metric("Live Line", f"{item['live_line']}", delta=f"{item['diff']:.1f}")
+                
+                # Column 3: Pre-Game Reference
+                col3.metric("Pre Line", f"{item['pre_line']}")
+                
+                # Column 4: Combined Odds
+                col4.write(f"**Over:** {item['over']}")
+                col4.write(f"**Under:** {item['under']}")
+                
+                st.divider()
