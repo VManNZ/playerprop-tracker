@@ -2,6 +2,8 @@ import streamlit as st
 import requests
 import json
 import os
+from datetime import datetime
+import time
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
@@ -14,7 +16,7 @@ try:
     DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]
     gcp_info = json.loads(st.secrets["GCP_JSON"])
     
-    # 🛠️ FIX 1: Explicitly add the Drive Scope so the bot has full permission
+    # Authenticate with Drive Scope
     SCOPES = ['https://www.googleapis.com/auth/drive']
     GCP_CREDS = service_account.Credentials.from_service_account_info(
         gcp_info, scopes=SCOPES
@@ -32,30 +34,36 @@ def get_drive_service():
     return build('drive', 'v3', credentials=GCP_CREDS)
 
 def save_snapshot_to_drive(data):
-    """Uploads the JSON data to Google Drive with Error Printing."""
+    """Uploads the JSON data + Timestamp to Google Drive."""
     try:
         service = get_drive_service()
         
-        # Check if file already exists
-        # 🛠️ FIX 2: Added Error Handling here to print the real reason
+        # 1. Wrap data with Timestamp
+        # We use a wrapper dict now instead of a raw list
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
+        payload = {
+            "last_updated": timestamp,
+            "games": data
+        }
+        
+        # 2. Check for existing file
         query = f"'{DRIVE_FOLDER_ID}' in parents and name = '{SNAPSHOT_FILENAME}' and trashed = false"
         results = service.files().list(q=query, fields="files(id)").execute()
         files = results.get('files', [])
         
-        file_content = json.dumps(data)
+        file_content = json.dumps(payload)
         media = MediaIoBaseUpload(io.BytesIO(file_content.encode('utf-8')), mimetype='application/json')
         
         if files:
             file_id = files[0]['id']
             service.files().update(fileId=file_id, media_body=media).execute()
-            return "Updated existing snapshot in Drive."
+            return f"Updated snapshot ({timestamp})"
         else:
             file_metadata = {'name': SNAPSHOT_FILENAME, 'parents': [DRIVE_FOLDER_ID]}
             service.files().create(body=file_metadata, media_body=media).execute()
-            return "Created new snapshot in Drive."
+            return f"Created new snapshot ({timestamp})"
             
     except HttpError as error:
-        # This will print the REDACTED error to your screen so we can read it
         error_reason = error.content.decode('utf-8')
         st.error(f"🛑 Google Drive Error: {error_reason}")
         return None
@@ -64,13 +72,14 @@ def save_snapshot_to_drive(data):
         return None
 
 def load_snapshot_from_drive():
+    """Downloads data and extracts timestamp."""
     try:
         service = get_drive_service()
         query = f"'{DRIVE_FOLDER_ID}' in parents and name = '{SNAPSHOT_FILENAME}' and trashed = false"
         results = service.files().list(q=query, fields="files(id)").execute()
         files = results.get('files', [])
         
-        if not files: return None
+        if not files: return None, None
 
         file_id = files[0]['id']
         request = service.files().get_media(fileId=file_id)
@@ -80,10 +89,18 @@ def load_snapshot_from_drive():
         while done is False:
             status, done = downloader.next_chunk()
         fh.seek(0)
-        return json.load(fh)
+        
+        content = json.load(fh)
+        
+        # Handle backward compatibility (if file is just a list from old version)
+        if isinstance(content, list):
+            return "Unknown (Old Format)", content
+            
+        return content.get("last_updated"), content.get("games")
+        
     except Exception as e:
         st.error(f"Error loading from Drive: {e}")
-        return None
+        return None, None
 
 # --- ODDS API FUNCTIONS ---
 def get_active_games():
@@ -96,7 +113,12 @@ def get_active_games():
     return []
 
 def get_props_for_game(game_id):
-    market_list = 'player_points,player_rebounds,player_assists,player_points_assists,player_points_rebounds,player_points_rebounds_assists,player_rebounds_assists'
+    # Added all Combo markets explicitly here
+    market_list = (
+        'player_points,player_rebounds,player_assists,'
+        'player_points_assists,player_points_rebounds,player_rebounds_assists,'
+        'player_points_rebounds_assists'
+    )
     url = f'https://api.the-odds-api.com/v4/sports/{SPORT}/events/{game_id}/odds'
     params = {
         'apiKey': API_KEY,
@@ -128,17 +150,31 @@ def fetch_all_nba_data():
 
 # --- APP LAYOUT ---
 st.set_page_config(page_title="NBA Tracker + Drive", page_icon="☁️", layout="wide")
-st.title("☁️ NBA Tracker (Synced to Google Drive)")
+st.title("☁️ NBA Tracker (Synced to Drive)")
 
 # Sidebar
 st.sidebar.header("⚙️ Controls")
 
+# 1. SNAPSHOT BUTTON
 if st.sidebar.button("📸 1. Take Pre-Game Snapshot"):
     with st.spinner("Fetching odds & Syncing to Drive..."):
         data = fetch_all_nba_data()
         if data:
             msg = save_snapshot_to_drive(data)
-            if msg: st.sidebar.success(f"Success: {msg}")
+            if msg: st.sidebar.success(f"{msg}")
+            time.sleep(1) # Small pause to let Drive catch up
+            st.rerun() # Refresh page to show new timestamp
+
+# 2. LOAD TIMESTAMP
+# We load the header lightly just to check the time
+try:
+    last_ts, _ = load_snapshot_from_drive()
+    if last_ts:
+        st.sidebar.info(f"🕒 Snapshot: {last_ts}")
+    else:
+        st.sidebar.warning("⚠️ No Snapshot found")
+except:
+    pass
 
 st.sidebar.write("---")
 mode = st.sidebar.radio("View Mode", ["🔥 Market Scanner", "🔎 Player Search"])
@@ -150,12 +186,15 @@ if mode == "🔥 Market Scanner":
 elif mode == "🔎 Player Search":
     search_query = st.text_input("Enter Player Name", "")
 
+# 3. COMPARE BUTTON
 if st.button("🚀 2. Compare Live Data"):
+    
+    # Load FULL data from Drive
     with st.spinner("Loading Snapshot from Google Drive..."):
-        pre_game_data = load_snapshot_from_drive()
+        ts, pre_game_data = load_snapshot_from_drive()
     
     if not pre_game_data:
-        st.error("⚠️ No snapshot found in your Google Drive! Take a snapshot first.")
+        st.error("⚠️ No snapshot data found! Please take a snapshot.")
         st.stop()
 
     with st.spinner("Fetching Live Odds..."):
@@ -167,6 +206,8 @@ if st.button("🚀 2. Compare Live Data"):
 
     # --- COMPARISON LOGIC ---
     st.subheader(f"Results")
+    if ts: st.caption(f"Comparing against snapshot from: {ts}")
+    
     found_movers = False
     
     pre_map = {}
@@ -183,7 +224,9 @@ if st.button("🚀 2. Compare Live Data"):
             if book['key'] != TARGET_BOOKMAKER_KEY: continue
             for market in book.get('markets', []):
                 for outcome in market.get('outcomes', []):
+                    
                     if mode == "🔎 Player Search" and search_query.lower() not in outcome['description'].lower(): continue
+                    
                     unique_key = f"{outcome['description']}|{market['key']}|{outcome['name']}"
                     
                     if unique_key in pre_map:
@@ -191,14 +234,24 @@ if st.button("🚀 2. Compare Live Data"):
                         live_line = outcome.get('point')
                         if pre_line is not None and live_line is not None:
                             line_diff = live_line - pre_line
+                            
                             if mode == "🔥 Market Scanner" and abs(line_diff) < threshold: continue
+                            
                             found_movers = True
                             
                             with st.container():
                                 col1, col2, col3, col4 = st.columns([2, 1.5, 1, 1])
-                                clean_market = market['key'].replace('player_', '').replace('_', ' ').title()
+                                
+                                # Format Market Names Nicely
+                                market_key = market['key']
+                                if market_key == 'player_points_assists': pretty_market = "Pts + Asts"
+                                elif market_key == 'player_points_rebounds': pretty_market = "Pts + Rebs"
+                                elif market_key == 'player_rebounds_assists': pretty_market = "Rebs + Asts"
+                                elif market_key == 'player_points_rebounds_assists': pretty_market = "Pts + Rebs + Asts"
+                                else: pretty_market = market_key.replace('player_', '').replace('_', ' ').title()
+
                                 col1.markdown(f"**{outcome['description']}**")
-                                col1.caption(f"{clean_market} ({outcome['name']})")
+                                col1.caption(f"{pretty_market} ({outcome['name']})")
                                 col2.write(f"🏦 {book['title']}")
                                 col3.metric("Live Line", f"{live_line}", delta=f"{line_diff:.1f}")
                                 col4.metric("Pre Line", f"{pre_line}")
@@ -206,4 +259,4 @@ if st.button("🚀 2. Compare Live Data"):
                                 st.divider()
 
     if not found_movers:
-        st.info("No matching records found.")
+        st.info("No records found matching your criteria.")
