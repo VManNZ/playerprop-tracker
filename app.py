@@ -39,12 +39,10 @@ def get_drive_service():
     return build('drive', 'v3', credentials=GCP_CREDS)
 
 def get_snapshot_file_id(service):
-    """Finds the most recent snapshot file."""
     query = f"'{DRIVE_FOLDER_ID}' in parents and name = '{SNAPSHOT_FILENAME}' and trashed = false"
     results = service.files().list(q=query, orderBy='modifiedTime desc', fields="files(id, name, modifiedTime)").execute()
     files = results.get('files', [])
     if not files: return None, 0
-    if len(files) > 1: st.toast(f"⚠️ Found {len(files)} duplicate files. Using newest.", icon="⚠️")
     return files[0]['id'], len(files)
 
 def save_snapshot_to_drive(data):
@@ -64,7 +62,6 @@ def save_snapshot_to_drive(data):
             file_metadata = {'name': SNAPSHOT_FILENAME, 'parents': [DRIVE_FOLDER_ID]}
             service.files().create(body=file_metadata, media_body=media).execute()
             return f"Created new snapshot ({timestamp})"
-            
     except HttpError as error:
         st.error(f"🛑 Google Drive Error: {error.content.decode('utf-8')}")
         return None
@@ -77,32 +74,44 @@ def load_snapshot_from_drive():
         service = get_drive_service()
         file_id, count = get_snapshot_file_id(service)
         if not file_id: return None, None
-
         request = service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
         done = False
         while done is False: status, done = downloader.next_chunk()
         fh.seek(0)
-        
         content = json.load(fh)
-        # Handle "Blank File" list [] gracefully
-        if isinstance(content, list): 
-            return "No Data (Blank File)", content
+        if isinstance(content, list): return "No Data (Blank File)", content
         return content.get("last_updated"), content.get("games")
-        
     except Exception as e:
         st.error(f"Error loading from Drive: {e}")
         return None, None
 
 # --- ODDS API FUNCTIONS ---
 def get_active_games():
+    """Fetches games and checks API HEADERS for credit limits."""
     url = f'https://api.the-odds-api.com/v4/sports/{SPORT}/events'
     params = {'apiKey': API_KEY}
     try:
         response = requests.get(url, params=params)
-        if response.status_code == 200: return response.json()
-    except: pass
+        
+        # 🕵️ DIAGNOSTIC: Check Headers
+        if 'x-requests-remaining' in response.headers:
+            remaining = response.headers['x-requests-remaining']
+            used = response.headers.get('x-requests-used', '?')
+            # Save to session state to display in sidebar
+            st.session_state['api_remaining'] = remaining
+            st.session_state['api_used'] = used
+        
+        if response.status_code == 200:
+            return response.json()
+        elif response.status_code == 401:
+            st.error("🛑 API Error 401: Unauthorized. Your API Key might be wrong.")
+        elif response.status_code == 429:
+            st.error("🛑 API Error 429: Quota Exceeded. You have 0 credits left.")
+            
+    except Exception as e:
+        st.error(f"Connection Error: {e}")
     return []
 
 def get_props_for_game(game_id):
@@ -123,9 +132,13 @@ def fetch_all_nba_data():
     all_data = []
     games = get_active_games()
     
-    # 🛑 DEBUG: Check if games exist at all
     if not games:
-        st.error("⚠️ API returned 0 active games. (Are there games scheduled today?)")
+        # Check if we captured the credit limit
+        rem = st.session_state.get('api_remaining', 'Unknown')
+        if rem == '0':
+            st.error("🚨 YOU ARE OUT OF CREDITS! The API blocked the request.")
+        else:
+            st.warning("⚠️ API returned 0 games, but you still have credits. Likely no games scheduled/listed.")
         return []
 
     if games:
@@ -172,19 +185,25 @@ st.title("☁️ NBA Tracker (FanDuel)")
 st.sidebar.header("⚙️ Controls")
 
 if st.sidebar.button("📸 1. Take Pre-Game Snapshot"):
-    with st.spinner("Fetching odds..."):
+    with st.spinner("Checking API & Syncing..."):
         data = fetch_all_nba_data()
         
         if data:
-            with st.spinner("Syncing to Drive..."):
-                msg = save_snapshot_to_drive(data)
-                if msg: st.sidebar.success(f"{msg}")
-                time.sleep(2) 
-                st.rerun()
-        else:
-            # 🛑 ERROR ALERT IF NO DATA FOUND
-            st.sidebar.error("❌ Scan failed: No odds found for FanDuel.")
-            st.sidebar.warning("Possible reasons:\n1. No games today.\n2. Odds not released yet.\n3. API Key limit reached.")
+            msg = save_snapshot_to_drive(data)
+            if msg: st.sidebar.success(f"{msg}")
+            time.sleep(2) 
+            st.rerun()
+
+# --- API HEALTH METER ---
+if 'api_remaining' in st.session_state:
+    rem = int(st.session_state['api_remaining'])
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📊 API Usage")
+    if rem > 0:
+        st.sidebar.success(f"Credits Left: **{rem}**")
+    else:
+        st.sidebar.error(f"Credits Left: **{rem}** (Refill needed!)")
+    st.sidebar.caption(f"Used this month: {st.session_state.get('api_used', '?')}")
 
 # LOAD TIMESTAMP
 try:
@@ -286,7 +305,3 @@ if st.button("🚀 2. Compare Live Data"):
                 col4.write(f"**Over:** {item['over']}")
                 col4.write(f"**Under:** {item['under']}")
                 st.divider()
-
-    with st.expander("🛠️ Debug Information"):
-        st.write(f"**Target Bookmaker:** `{TARGET_BOOKMAKER_KEY}`")
-        st.write(f"**Snapshot Data Size:** {len(pre_flat)} props")
