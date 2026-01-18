@@ -27,8 +27,8 @@ except Exception as e:
 SPORT = 'basketball_nba'
 SNAPSHOT_FILENAME = 'nba_odds_snapshot.json'
 
-# 👇 UPDATED TARGET BOOKMAKER
-TARGET_BOOKMAKER_KEY = 'betmgm' 
+# 👇 UPDATED TO FANDUEL
+TARGET_BOOKMAKER_KEY = 'fanduel' 
 
 # Custom Sort Order
 MARKET_ORDER = [
@@ -171,7 +171,7 @@ def flatten_data(game_data_list):
 
 # --- APP LAYOUT ---
 st.set_page_config(page_title="NBA Tracker + Drive", page_icon="☁️", layout="wide")
-st.title("☁️ NBA Tracker (BetMGM)")
+st.title("☁️ NBA Tracker (FanDuel)")
 
 # Sidebar
 st.sidebar.header("⚙️ Controls")
