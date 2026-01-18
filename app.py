@@ -5,21 +5,26 @@ import os
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
+from googleapiclient.errors import HttpError
 import io
 
 # --- CONFIGURATION ---
 try:
     API_KEY = st.secrets["API_KEY"]
     DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]
-    # Load the Google Credentials from the secrets string
     gcp_info = json.loads(st.secrets["GCP_JSON"])
-    GCP_CREDS = service_account.Credentials.from_service_account_info(gcp_info)
-except:
-    st.error("⚠️ Secrets not found! Make sure API_KEY, DRIVE_FOLDER_ID, and GCP_JSON are in secrets.toml")
+    
+    # 🛠️ FIX 1: Explicitly add the Drive Scope so the bot has full permission
+    SCOPES = ['https://www.googleapis.com/auth/drive']
+    GCP_CREDS = service_account.Credentials.from_service_account_info(
+        gcp_info, scopes=SCOPES
+    )
+except Exception as e:
+    st.error(f"⚠️ Secret Config Error: {e}")
     st.stop()
 
 SPORT = 'basketball_nba'
-SNAPSHOT_FILENAME = 'nba_odds_snapshot.json' # File name in Drive
+SNAPSHOT_FILENAME = 'nba_odds_snapshot.json'
 TARGET_BOOKMAKER_KEY = 'betonlineag' 
 
 # --- GOOGLE DRIVE FUNCTIONS ---
@@ -27,52 +32,58 @@ def get_drive_service():
     return build('drive', 'v3', credentials=GCP_CREDS)
 
 def save_snapshot_to_drive(data):
-    """Uploads the JSON data to the specific Google Drive Folder."""
-    service = get_drive_service()
-    
-    # 1. Check if file already exists in the folder
-    query = f"'{DRIVE_FOLDER_ID}' in parents and name = '{SNAPSHOT_FILENAME}' and trashed = false"
-    results = service.files().list(q=query, fields="files(id)").execute()
-    files = results.get('files', [])
-    
-    # Convert data to a file-like object
-    file_content = json.dumps(data)
-    media = MediaIoBaseUpload(io.BytesIO(file_content.encode('utf-8')), mimetype='application/json')
-    
-    if files:
-        # Update existing file
-        file_id = files[0]['id']
-        service.files().update(fileId=file_id, media_body=media).execute()
-        return "Updated existing snapshot in Drive."
-    else:
-        # Create new file
-        file_metadata = {'name': SNAPSHOT_FILENAME, 'parents': [DRIVE_FOLDER_ID]}
-        service.files().create(body=file_metadata, media_body=media).execute()
-        return "Created new snapshot in Drive."
-
-def load_snapshot_from_drive():
-    """Downloads the JSON data from Drive."""
-    service = get_drive_service()
-    
-    # Find the file
-    query = f"'{DRIVE_FOLDER_ID}' in parents and name = '{SNAPSHOT_FILENAME}' and trashed = false"
-    results = service.files().list(q=query, fields="files(id)").execute()
-    files = results.get('files', [])
-    
-    if not files:
+    """Uploads the JSON data to Google Drive with Error Printing."""
+    try:
+        service = get_drive_service()
+        
+        # Check if file already exists
+        # 🛠️ FIX 2: Added Error Handling here to print the real reason
+        query = f"'{DRIVE_FOLDER_ID}' in parents and name = '{SNAPSHOT_FILENAME}' and trashed = false"
+        results = service.files().list(q=query, fields="files(id)").execute()
+        files = results.get('files', [])
+        
+        file_content = json.dumps(data)
+        media = MediaIoBaseUpload(io.BytesIO(file_content.encode('utf-8')), mimetype='application/json')
+        
+        if files:
+            file_id = files[0]['id']
+            service.files().update(fileId=file_id, media_body=media).execute()
+            return "Updated existing snapshot in Drive."
+        else:
+            file_metadata = {'name': SNAPSHOT_FILENAME, 'parents': [DRIVE_FOLDER_ID]}
+            service.files().create(body=file_metadata, media_body=media).execute()
+            return "Created new snapshot in Drive."
+            
+    except HttpError as error:
+        # This will print the REDACTED error to your screen so we can read it
+        error_reason = error.content.decode('utf-8')
+        st.error(f"🛑 Google Drive Error: {error_reason}")
+        return None
+    except Exception as e:
+        st.error(f"🛑 Unexpected Error: {e}")
         return None
 
-    # Download it
-    file_id = files[0]['id']
-    request = service.files().get_media(fileId=file_id)
-    fh = io.BytesIO()
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while done is False:
-        status, done = downloader.next_chunk()
+def load_snapshot_from_drive():
+    try:
+        service = get_drive_service()
+        query = f"'{DRIVE_FOLDER_ID}' in parents and name = '{SNAPSHOT_FILENAME}' and trashed = false"
+        results = service.files().list(q=query, fields="files(id)").execute()
+        files = results.get('files', [])
         
-    fh.seek(0)
-    return json.load(fh)
+        if not files: return None
+
+        file_id = files[0]['id']
+        request = service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+        fh.seek(0)
+        return json.load(fh)
+    except Exception as e:
+        st.error(f"Error loading from Drive: {e}")
+        return None
 
 # --- ODDS API FUNCTIONS ---
 def get_active_games():
@@ -127,7 +138,7 @@ if st.sidebar.button("📸 1. Take Pre-Game Snapshot"):
         data = fetch_all_nba_data()
         if data:
             msg = save_snapshot_to_drive(data)
-            st.sidebar.success(f"Success: {msg}")
+            if msg: st.sidebar.success(f"Success: {msg}")
 
 st.sidebar.write("---")
 mode = st.sidebar.radio("View Mode", ["🔥 Market Scanner", "🔎 Player Search"])
@@ -140,7 +151,6 @@ elif mode == "🔎 Player Search":
     search_query = st.text_input("Enter Player Name", "")
 
 if st.button("🚀 2. Compare Live Data"):
-    # LOAD FROM DRIVE INSTEAD OF LOCAL DISK
     with st.spinner("Loading Snapshot from Google Drive..."):
         pre_game_data = load_snapshot_from_drive()
     
@@ -155,7 +165,7 @@ if st.button("🚀 2. Compare Live Data"):
         st.error("No live games found.")
         st.stop()
 
-    # --- COMPARISON LOGIC (Same as before) ---
+    # --- COMPARISON LOGIC ---
     st.subheader(f"Results")
     found_movers = False
     
