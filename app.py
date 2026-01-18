@@ -39,7 +39,6 @@ def save_snapshot_to_drive(data):
         service = get_drive_service()
         
         # 1. Wrap data with Timestamp
-        # We use a wrapper dict now instead of a raw list
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
         payload = {
             "last_updated": timestamp,
@@ -92,9 +91,8 @@ def load_snapshot_from_drive():
         
         content = json.load(fh)
         
-        # Handle backward compatibility (if file is just a list from old version)
         if isinstance(content, list):
-            return "Unknown (Old Format)", content
+            return "Old Format (Please Retake Snapshot)", content
             
         return content.get("last_updated"), content.get("games")
         
@@ -113,12 +111,13 @@ def get_active_games():
     return []
 
 def get_props_for_game(game_id):
-    # Added all Combo markets explicitly here
+    # 👇 EXPLICITLY REQUESTING ALL 7 MARKETS
     market_list = (
-        'player_points,player_rebounds,player_assists,'
-        'player_points_assists,player_points_rebounds,player_rebounds_assists,'
-        'player_points_rebounds_assists'
+        'player_points,player_rebounds,player_assists,'             # The 3 Singles
+        'player_points_rebounds_assists,player_points_rebounds,'    # Combo 1 & 2
+        'player_points_assists,player_rebounds_assists'             # Combo 3 & 4
     )
+    
     url = f'https://api.the-odds-api.com/v4/sports/{SPORT}/events/{game_id}/odds'
     params = {
         'apiKey': API_KEY,
@@ -162,11 +161,10 @@ if st.sidebar.button("📸 1. Take Pre-Game Snapshot"):
         if data:
             msg = save_snapshot_to_drive(data)
             if msg: st.sidebar.success(f"{msg}")
-            time.sleep(1) # Small pause to let Drive catch up
-            st.rerun() # Refresh page to show new timestamp
+            time.sleep(1) 
+            st.rerun() 
 
 # 2. LOAD TIMESTAMP
-# We load the header lightly just to check the time
 try:
     last_ts, _ = load_snapshot_from_drive()
     if last_ts:
@@ -189,7 +187,6 @@ elif mode == "🔎 Player Search":
 # 3. COMPARE BUTTON
 if st.button("🚀 2. Compare Live Data"):
     
-    # Load FULL data from Drive
     with st.spinner("Loading Snapshot from Google Drive..."):
         ts, pre_game_data = load_snapshot_from_drive()
     
@@ -242,7 +239,7 @@ if st.button("🚀 2. Compare Live Data"):
                             with st.container():
                                 col1, col2, col3, col4 = st.columns([2, 1.5, 1, 1])
                                 
-                                # Format Market Names Nicely
+                                # 👇 PRETTY PRINTING THE COMBO MARKETS
                                 market_key = market['key']
                                 if market_key == 'player_points_assists': pretty_market = "Pts + Asts"
                                 elif market_key == 'player_points_rebounds': pretty_market = "Pts + Rebs"
