@@ -26,9 +26,7 @@ except Exception as e:
 
 SPORT = 'basketball_nba'
 SNAPSHOT_FILENAME = 'nba_odds_snapshot.json'
-
-# 👇 UPDATED TO FANDUEL
-TARGET_BOOKMAKER_KEY = 'fanduel' 
+TARGET_BOOKMAKER_KEY = 'fanduel'  # Set to 'fanduel'
 
 # Custom Sort Order
 MARKET_ORDER = [
@@ -145,11 +143,16 @@ def fetch_all_nba_data():
 def flatten_data(game_data_list):
     """Converts the complex API response into a flat list of props."""
     flat_list = []
-    if not game_data_list: return flat_list
+    found_bookies = set() # Debugging helper
+    
+    if not game_data_list: return flat_list, found_bookies
     
     for game in game_data_list:
         for book in game.get('bookmakers', []):
+            found_bookies.add(book['key']) # Track what we found
+            
             if book['key'] != TARGET_BOOKMAKER_KEY: continue
+            
             for market in book.get('markets', []):
                 for outcome in market.get('outcomes', []):
                     # Only grab one outcome (e.g., Over) to represent the line
@@ -167,7 +170,7 @@ def flatten_data(game_data_list):
                             "under": under_price,
                             "book": book['title']
                         })
-    return flat_list
+    return flat_list, found_bookies
 
 # --- APP LAYOUT ---
 st.set_page_config(page_title="NBA Tracker + Drive", page_icon="☁️", layout="wide")
@@ -219,17 +222,24 @@ if st.button("🚀 2. Compare Live Data"):
         st.warning("⚠️ No live games active. Showing Snapshot data only.")
 
     # 3. PREPARE DATA LOOKUPS
-    pre_flat = flatten_data(pre_game_data)
-    live_flat = flatten_data(live_data)
+    pre_flat, pre_bookies = flatten_data(pre_game_data)
+    live_flat, live_bookies = flatten_data(live_data)
     
-    # Create Dictionaries for fast matching: Key = "PlayerName|MarketKey"
+    # 🚨 DIAGNOSTIC CHECK 🚨
+    if not pre_flat:
+        st.error(f"❌ Your snapshot is empty for '{TARGET_BOOKMAKER_KEY}'!")
+        if pre_bookies:
+            st.warning(f"Found data for these bookies instead: {', '.join(pre_bookies)}")
+        st.info("💡 FIX: Click 'Take Pre-Game Snapshot' in the sidebar to overwrite the old data.")
+        st.stop()
+
+    # Create Dictionaries
     pre_map = {f"{x['player']}|{x['market_key']}": x for x in pre_flat}
     live_map = {f"{x['player']}|{x['market_key']}": x for x in live_flat}
     
     results_list = []
 
     # --- LOGIC BRANCH A: SCANNER MODE ---
-    # Only checks active live lines
     if mode == "🔥 Market Scanner":
         if not live_flat:
             st.error("Scanner requires live games. None found.")
@@ -251,14 +261,15 @@ if st.button("🚀 2. Compare Live Data"):
                         })
 
     # --- LOGIC BRANCH B: SEARCH MODE ---
-    # Checks Snapshot FIRST, then fills in Live data if available
     elif mode == "🔎 Player Search":
         if not search_query:
             st.warning("Please enter a player name.")
             st.stop()
 
+        found_match = False
         for key, pre_item in pre_map.items():
             if search_query.lower() in pre_item['player'].lower():
+                found_match = True
                 
                 # Check if this prop exists in Live Data
                 if key in live_map:
@@ -280,6 +291,9 @@ if st.button("🚀 2. Compare Live Data"):
                         "diff": 0,
                         "status": "inactive"
                     })
+        
+        if not found_match:
+             st.warning(f"No player found matching '{search_query}'. (Checked {len(pre_map)} total records).")
 
     # --- 4. DISPLAY RESULTS ---
     if not results_list:
@@ -324,3 +338,10 @@ if st.button("🚀 2. Compare Live Data"):
                 col4.write(f"**Under:** {item['under']}")
                 
                 st.divider()
+
+    # --- DEBUG SECTION (Bottom of Page) ---
+    with st.expander("🛠️ Debug Information"):
+        st.write(f"**Target Bookmaker:** `{TARGET_BOOKMAKER_KEY}`")
+        st.write(f"**Total Pre-Game Props Loaded:** {len(pre_flat)}")
+        if pre_bookies:
+            st.write(f"**Bookmakers found in Snapshot:** {list(pre_bookies)}")
