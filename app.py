@@ -106,7 +106,7 @@ def load_snapshot_from_drive():
         st.error(f"Error loading from Drive: {e}")
         return None, None
 
-# --- OPTIMIZED API FUNCTIONS ---
+# --- OPTIMISED API FUNCTIONS ---
 
 # ✨ Cache games list longer (5 minutes) - games don't appear/disappear that fast
 @st.cache_data(ttl=300, show_spinner=False)
@@ -183,7 +183,7 @@ def get_totals_for_game(game_id):
         return None
     return None
 
-# ✨ MAIN OPTIMIZER: Cache props data for 60 seconds
+# ✨ MAIN OPTIMISER: Cache props data for 60 seconds
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_props_for_games_cached(game_ids_tuple):
     """Fetches props only for specified game IDs. Uses tuple for hashability."""
@@ -293,7 +293,7 @@ def flatten_totals_data(game_data_list):
 
 # --- APP LAYOUT ---
 st.set_page_config(page_title="NBA Tracker", page_icon="☁️", layout="wide")
-st.title("☁️ NBA Tracker (Optimized)")
+st.title("☁️ NBA Tracker (Optimised)")
 
 # Sidebar
 st.sidebar.header("⚙️ Controls")
@@ -357,12 +357,15 @@ mode = st.sidebar.radio("View Mode", ["🔥 Market Scanner", "🔎 Player Search
 threshold = 0
 search_query = ""
 
+# ✨ UPDATED: Modified sliders with higher minimum thresholds
 if mode == "🔥 Market Scanner":
-    threshold = st.sidebar.slider("Show moves greater than (+/-)", 1.0, 15.0, 4.0, 0.5)
+    # Min 8, Max 25, Default 8
+    threshold = st.sidebar.slider("Show moves greater than (+/-)", 8.0, 25.0, 8.0, 0.5)
 elif mode == "🔎 Player Search":
     search_query = st.text_input("Enter Player Name", "")
 elif mode == "🏀 Game Totals":
-    threshold = st.sidebar.slider("Show total moves greater than (+/-)", 0.5, 10.0, 2.0, 0.5)
+    # Min 10, Max 30, Default 10
+    threshold = st.sidebar.slider("Show total moves greater than (+/-)", 10.0, 30.0, 10.0, 0.5)
 
 # 🚀 LIVE DATA CONTROLS
 col1, col2 = st.columns([1, 4])
@@ -598,8 +601,8 @@ if scan_clicked or st.session_state.get('scan_active', False):
         elif search_query or mode == "🔥 Market Scanner":
             st.info("No records found matching your criteria.")
 
-# ✨ Show optimization info
-with st.expander("💡 Optimization Info"):
+# ✨ Show optimisation info
+with st.expander("💡 Optimisation Info"):
     st.markdown("""
     **How this saves API credits:**
     
