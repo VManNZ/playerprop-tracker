@@ -228,7 +228,6 @@ def flatten_data(game_data_list):
     if not game_data_list: return flat_list, found_bookies
     
     for game in game_data_list:
-        # Extract team names from the game
         home_team = game.get('home_team', 'Unknown')
         away_team = game.get('away_team', 'Unknown')
         
@@ -242,8 +241,6 @@ def flatten_data(game_data_list):
                         under_outcome = next((o for o in market['outcomes'] if o['name'] == 'Under'), None)
                         under_price = under_outcome['price'] if under_outcome else '-'
                         
-                        # Try to determine which team the player belongs to
-                        # The API doesn't explicitly provide this, so we store both teams
                         flat_list.append({
                             "player": outcome['description'], 
                             "market_key": market['key'],
@@ -357,15 +354,15 @@ mode = st.sidebar.radio("View Mode", ["🔥 Market Scanner", "🔎 Player Search
 threshold = 0
 search_query = ""
 
-# ✨ UPDATED: Modified sliders with higher minimum thresholds
+# ✨ FIX: Allowed lower minimums (1.0) so you can verify the scanner works
 if mode == "🔥 Market Scanner":
-    # Min 8, Max 25, Default 8
-    threshold = st.sidebar.slider("Show moves greater than (+/-)", 8.0, 25.0, 8.0, 0.5)
+    # Default 8.0, but allows going down to 1.0
+    threshold = st.sidebar.slider("Show moves greater than (+/-)", 1.0, 25.0, 8.0, 0.5)
 elif mode == "🔎 Player Search":
     search_query = st.text_input("Enter Player Name", "")
 elif mode == "🏀 Game Totals":
-    # Min 10, Max 30, Default 10
-    threshold = st.sidebar.slider("Show total moves greater than (+/-)", 10.0, 30.0, 10.0, 0.5)
+    # Default 10.0, but allows going down to 1.0
+    threshold = st.sidebar.slider("Show total moves greater than (+/-)", 1.0, 30.0, 10.0, 0.5)
 
 # 🚀 LIVE DATA CONTROLS
 col1, col2 = st.columns([1, 4])
@@ -388,14 +385,6 @@ if scan_clicked or st.session_state.get('scan_active', False):
         st.error("⚠️ No snapshot data found. Take a snapshot first!")
         st.stop()
 
-    # DEBUG: Show what we loaded
-    with st.expander("🔍 Debug: Snapshot Data Structure"):
-        st.write("**Snapshot type:**", type(pre_game_data))
-        st.write("**Snapshot keys:**", list(pre_game_data.keys()) if isinstance(pre_game_data, dict) else "Not a dict")
-        if isinstance(pre_game_data, dict):
-            st.write("**Props data length:**", len(pre_game_data.get('props', [])))
-            st.write("**Totals data length:**", len(pre_game_data.get('totals', [])))
-
     # Extract props and totals from snapshot
     pre_props_data = pre_game_data.get('props', [])
     pre_totals_data = pre_game_data.get('totals', [])
@@ -413,13 +402,6 @@ if scan_clicked or st.session_state.get('scan_active', False):
         live_props_data = fetch_props_for_games_cached(game_ids)
         live_totals_data = fetch_totals_for_games_cached(game_ids)
 
-    # DEBUG: Show what we fetched live
-    with st.expander("🔍 Debug: Live Data Structure"):
-        st.write("**Live props data length:**", len(live_props_data) if live_props_data else 0)
-        st.write("**Live totals data length:**", len(live_totals_data) if live_totals_data else 0)
-        if live_props_data:
-            st.write("**Sample live props game:**", live_props_data[0] if len(live_props_data) > 0 else "None")
-
     if not live_props_data and not live_totals_data:
         st.warning("⚠️ No live odds data available.")
         st.stop()
@@ -429,15 +411,6 @@ if scan_clicked or st.session_state.get('scan_active', False):
         # Game Totals Mode
         pre_flat, pre_bookies = flatten_totals_data(pre_totals_data)
         live_flat, live_bookies = flatten_totals_data(live_totals_data)
-        
-        # DEBUG
-        with st.expander("🔍 Debug: Totals Flattened Data"):
-            st.write("**Pre-game flat records:**", len(pre_flat))
-            st.write("**Live flat records:**", len(live_flat))
-            if pre_flat:
-                st.write("**Sample pre-game record:**", pre_flat[0])
-            if live_flat:
-                st.write("**Sample live record:**", live_flat[0])
         
         if not pre_flat:
             st.error(f"❌ Your snapshot has no totals data for '{TARGET_BOOKMAKER_KEY}'!")
@@ -492,17 +465,6 @@ if scan_clicked or st.session_state.get('scan_active', False):
         # Player Props Mode (existing logic)
         pre_flat, pre_bookies = flatten_data(pre_props_data)
         live_flat, live_bookies = flatten_data(live_props_data)
-        
-        # DEBUG
-        with st.expander("🔍 Debug: Player Props Flattened Data"):
-            st.write("**Pre-game flat records:**", len(pre_flat))
-            st.write("**Live flat records:**", len(live_flat))
-            st.write("**Pre-game bookies found:**", list(pre_bookies))
-            st.write("**Live bookies found:**", list(live_bookies))
-            if pre_flat:
-                st.write("**Sample pre-game record:**", pre_flat[0])
-            if live_flat:
-                st.write("**Sample live record:**", live_flat[0])
         
         if not pre_flat:
             st.error(f"❌ Your snapshot is empty for '{TARGET_BOOKMAKER_KEY}'!")
@@ -559,6 +521,41 @@ if scan_clicked or st.session_state.get('scan_active', False):
                 if not found_match: 
                     st.warning(f"No player found matching '{search_query}'.")
 
+        # --- DIAGNOSTIC TOOL ---
+        # This block checks if we are filtering out everything, or if data is genuinely identical
+        if mode == "🔥 Market Scanner":
+            with st.expander("🛠️ Diagnostics (Open this if seeing 0 results)"):
+                st.write(f"**Snapshot Records:** {len(pre_map)}")
+                st.write(f"**Live Records:** {len(live_map)}")
+                
+                # Check for Cache Trap (identical data)
+                all_diffs = []
+                for key, live_item in live_map.items():
+                    if key in pre_map:
+                        pre_item = pre_map[key]
+                        if live_item['line'] is not None and pre_item['line'] is not None:
+                            d = live_item['line'] - pre_item['line']
+                            all_diffs.append({
+                                "player": live_item['player'],
+                                "market": live_item['market_key'],
+                                "diff": d
+                            })
+                
+                zeros = sum(1 for x in all_diffs if x['diff'] == 0)
+                st.write(f"**Exact Matches (Diff = 0):** {zeros}")
+                
+                if len(all_diffs) > 0 and len(all_diffs) == zeros:
+                    st.warning("⚠️ All live lines match the snapshot exactly. You are likely viewing cached data.")
+                    st.info("💡 Fix: Click 'Force Refresh Live Odds' at the top right.")
+                
+                # Show top 5 movers regardless of threshold
+                all_diffs.sort(key=lambda x: abs(x['diff']), reverse=True)
+                st.write("**Top 5 Biggest Moves Found (Raw Data):**")
+                if all_diffs:
+                    st.table(all_diffs[:5])
+                else:
+                    st.write("No matching players found between snapshot and live.")
+
         if results_list:
             st.subheader(f"Results ({len(results_list)})")
             if ts: 
@@ -573,7 +570,6 @@ if scan_clicked or st.session_state.get('scan_active', False):
                     col1, col2, col3, col4 = st.columns([2, 1.5, 1.5, 1])
                     m_key = item['market_key']
                     
-                    # Pretty market names
                     market_names = {
                         'player_points_assists': "Points + Assists",
                         'player_points_rebounds': "Points + Rebounds",
@@ -584,7 +580,6 @@ if scan_clicked or st.session_state.get('scan_active', False):
 
                     col1.markdown(f"**{item['player']}**")
                     col1.caption(f"{pretty}")
-                    # Display matchup info
                     if 'matchup' in item:
                         col1.caption(f"🏀 {item['matchup']}")
                     
@@ -615,13 +610,4 @@ with st.expander("💡 Optimisation Info"):
     4. **Snapshot Loading Cache**: Snapshot is cached for 2 minutes to avoid repeated Drive reads
     
     5. **Smart Refresh**: "Force Refresh" only clears necessary caches
-    
-    **Typical Usage:**
-    - Taking snapshot: ~1 credit (games list) + N credits (props) + N credits (totals) = 1 + 2N total
-    - Comparing live data (within 60s): 0 credits (cached)
-    - Comparing live data (after 60s): ~1 credit (games list) + N credits each for props/totals
-    - Player search: 0 credits (uses cached data)
-    - Game totals view: 0 credits if within cache window
-    
-    **Note**: Fetching totals adds N additional API calls (one per game) when taking snapshots
     """)
