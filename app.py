@@ -385,6 +385,14 @@ if scan_clicked or st.session_state.get('scan_active', False):
         st.error("⚠️ No snapshot data found. Take a snapshot first!")
         st.stop()
 
+    # DEBUG: Show what we loaded
+    with st.expander("🔍 Debug: Snapshot Data Structure"):
+        st.write("**Snapshot type:**", type(pre_game_data))
+        st.write("**Snapshot keys:**", list(pre_game_data.keys()) if isinstance(pre_game_data, dict) else "Not a dict")
+        if isinstance(pre_game_data, dict):
+            st.write("**Props data length:**", len(pre_game_data.get('props', [])))
+            st.write("**Totals data length:**", len(pre_game_data.get('totals', [])))
+
     # Extract props and totals from snapshot
     pre_props_data = pre_game_data.get('props', [])
     pre_totals_data = pre_game_data.get('totals', [])
@@ -402,6 +410,13 @@ if scan_clicked or st.session_state.get('scan_active', False):
         live_props_data = fetch_props_for_games_cached(game_ids)
         live_totals_data = fetch_totals_for_games_cached(game_ids)
 
+    # DEBUG: Show what we fetched live
+    with st.expander("🔍 Debug: Live Data Structure"):
+        st.write("**Live props data length:**", len(live_props_data) if live_props_data else 0)
+        st.write("**Live totals data length:**", len(live_totals_data) if live_totals_data else 0)
+        if live_props_data:
+            st.write("**Sample live props game:**", live_props_data[0] if len(live_props_data) > 0 else "None")
+
     if not live_props_data and not live_totals_data:
         st.warning("⚠️ No live odds data available.")
         st.stop()
@@ -411,6 +426,15 @@ if scan_clicked or st.session_state.get('scan_active', False):
         # Game Totals Mode
         pre_flat, pre_bookies = flatten_totals_data(pre_totals_data)
         live_flat, live_bookies = flatten_totals_data(live_totals_data)
+        
+        # DEBUG
+        with st.expander("🔍 Debug: Totals Flattened Data"):
+            st.write("**Pre-game flat records:**", len(pre_flat))
+            st.write("**Live flat records:**", len(live_flat))
+            if pre_flat:
+                st.write("**Sample pre-game record:**", pre_flat[0])
+            if live_flat:
+                st.write("**Sample live record:**", live_flat[0])
         
         if not pre_flat:
             st.error(f"❌ Your snapshot has no totals data for '{TARGET_BOOKMAKER_KEY}'!")
@@ -465,6 +489,17 @@ if scan_clicked or st.session_state.get('scan_active', False):
         # Player Props Mode (existing logic)
         pre_flat, pre_bookies = flatten_data(pre_props_data)
         live_flat, live_bookies = flatten_data(live_props_data)
+        
+        # DEBUG
+        with st.expander("🔍 Debug: Player Props Flattened Data"):
+            st.write("**Pre-game flat records:**", len(pre_flat))
+            st.write("**Live flat records:**", len(live_flat))
+            st.write("**Pre-game bookies found:**", list(pre_bookies))
+            st.write("**Live bookies found:**", list(live_bookies))
+            if pre_flat:
+                st.write("**Sample pre-game record:**", pre_flat[0])
+            if live_flat:
+                st.write("**Sample live record:**", live_flat[0])
         
         if not pre_flat:
             st.error(f"❌ Your snapshot is empty for '{TARGET_BOOKMAKER_KEY}'!")
