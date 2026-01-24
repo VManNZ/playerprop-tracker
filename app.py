@@ -3,7 +3,7 @@ import requests
 import json
 import io
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
@@ -66,6 +66,8 @@ def save_snapshot_to_drive(data):
         st.error(f"Drive Error: {e}")
         return None
 
+# Cache snapshot load to prevent slow Drive reads
+@st.cache_data(ttl=300) 
 def load_snapshot_from_drive():
     try:
         service = get_drive_service()
@@ -91,8 +93,10 @@ def load_snapshot_from_drive():
         st.error(f"Error loading Snapshot: {e}")
         return None, None
 
-# --- API FUNCTIONS (DIRECT) ---
+# --- API FUNCTIONS (OPTIMISED) ---
 
+# 1. Cache the Game List for 1 Hour (Games don't appear/disappear often)
+@st.cache_data(ttl=3600)
 def get_active_games():
     """Fetches currently active games."""
     url = f'https://api.the-odds-api.com/v4/sports/{SPORT}/events'
@@ -121,11 +125,14 @@ def get_odds_for_game(game_id, markets):
     except:
         return None
 
-def fetch_all_odds(game_ids, mode="props"):
-    """Fetches odds for a list of games."""
+# 2. Cache the heavy lifting (Odds Fetching) for 60 Seconds
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_all_odds_cached(game_ids, mode="props"):
+    """Fetches odds for a list of games with 60s cache."""
     all_data = []
     market_string = ','.join(MARKET_ORDER) if mode == "props" else TOTALS_MARKET
     
+    # Simple progress bar to show activity
     progress_bar = st.progress(0)
     for i, game_id in enumerate(game_ids):
         data = get_odds_for_game(game_id, market_string)
@@ -192,26 +199,47 @@ def flatten_data(game_data_list, is_totals=False):
 
 # --- APP LAYOUT ---
 st.set_page_config(page_title="NBA Tracker", page_icon="🏀", layout="wide")
-st.title("🏀 NBA Tracker (Direct Mode)")
+st.title("🏀 NBA Tracker (Optimised)")
 
 # Sidebar
 st.sidebar.header("Controls")
 
+# Time Window Filter
+hours_window = st.sidebar.slider("Scan games within (Hours)", 1, 48, 24)
+
 if st.sidebar.button("📸 Take Snapshot"):
+    # Clear caches so snapshot is fresh
+    get_active_games.clear()
+    fetch_all_odds_cached.clear()
+    
     with st.spinner("Fetching Fresh Data..."):
         games = get_active_games()
-        if games:
-            game_ids = [g['id'] for g in games]
-            props = fetch_all_odds(game_ids, mode="props")
-            totals = fetch_all_odds(game_ids, mode="totals")
+        # Filter games by time
+        valid_games = []
+        now = datetime.utcnow()
+        for g in games:
+            try:
+                commence = datetime.strptime(g['commence_time'], "%Y-%m-%dT%H:%M:%SZ")
+                if 0 <= (commence - now).total_seconds() / 3600 <= hours_window:
+                    valid_games.append(g)
+            except:
+                pass
+
+        if valid_games:
+            game_ids = [g['id'] for g in valid_games]
+            st.toast(f"Snapshotting {len(game_ids)} games...", icon="📸")
+            
+            props = fetch_all_odds_cached(game_ids, mode="props")
+            totals = fetch_all_odds_cached(game_ids, mode="totals")
             
             payload = {"props": props, "totals": totals}
             msg = save_snapshot_to_drive(payload)
             st.sidebar.success(msg)
+            load_snapshot_from_drive.clear() # Clear read cache
             time.sleep(1)
             st.rerun()
         else:
-            st.error("No active games found.")
+            st.error(f"No games found starting within {hours_window} hours.")
 
 if 'api_remaining' in st.session_state:
     st.sidebar.write(f"Credits: **{st.session_state['api_remaining']}**")
@@ -234,30 +262,51 @@ except:
     props_map, totals_map = {}, {}
 
 # View Controls
+st.sidebar.markdown("---")
 mode = st.sidebar.radio("Mode", ["Player Props", "Game Totals"])
 threshold = 0
 
 if mode == "Player Props":
-    threshold = st.sidebar.slider("Min Diff (+/-)", 1.0, 10.0, 3.0, 0.5)
+    # Scanner: Min 5.0, Max 20.0, Default 8.0
+    threshold = st.sidebar.slider("Min Diff (+/-)", 5.0, 20.0, 8.0, 0.5)
 else:
-    threshold = st.sidebar.slider("Min Diff (+/-)", 1.0, 15.0, 4.0, 0.5)
+    # Totals: Min 10.0, Max 30.0, Default 10.0
+    threshold = st.sidebar.slider("Min Diff (+/-)", 10.0, 30.0, 10.0, 0.5)
 
 # Main Action
-if st.button("🚀 Compare Live Data"):
-    with st.spinner("Fetching Live Odds..."):
+col1, col2 = st.columns([1, 4])
+with col1:
+    scan_btn = st.button("🚀 Compare Live Data")
+with col2:
+    if st.button("🔄 Force Refresh"):
+        fetch_all_odds_cached.clear()
+        st.toast("Cache cleared! Next scan fetches fresh data.", icon="🔄")
+
+if scan_btn:
+    with st.spinner("Fetching Live Odds (Cached 60s)..."):
         games = get_active_games()
-        if not games:
-            st.error("No active games found.")
+        
+        # Filter games by time again for live scan
+        valid_game_ids = []
+        now = datetime.utcnow()
+        for g in games:
+            try:
+                commence = datetime.strptime(g['commence_time'], "%Y-%m-%dT%H:%M:%SZ")
+                if 0 <= (commence - now).total_seconds() / 3600 <= hours_window:
+                    valid_game_ids.append(g['id'])
+            except:
+                pass
+        
+        if not valid_game_ids:
+            st.error(f"No active games found within {hours_window} hours.")
             st.stop()
             
-        game_ids = [g['id'] for g in games]
-        
         if mode == "Player Props":
-            live_raw = fetch_all_odds(game_ids, mode="props")
+            live_raw = fetch_all_odds_cached(valid_game_ids, mode="props")
             live_flat = flatten_data(live_raw, is_totals=False)
             compare_map = props_map
         else:
-            live_raw = fetch_all_odds(game_ids, mode="totals")
+            live_raw = fetch_all_odds_cached(valid_game_ids, mode="totals")
             live_flat = flatten_data(live_raw, is_totals=True)
             compare_map = totals_map
             
@@ -285,6 +334,7 @@ if st.button("🚀 Compare Live Data"):
         if results:
             results.sort(key=lambda x: abs(x['diff']), reverse=True)
             st.subheader(f"Found {len(results)} Movers")
+            st.caption(f"Comparing {len(live_flat)} live markets against {len(compare_map)} snapshot markets.")
             
             for res in results:
                 with st.container():
@@ -306,3 +356,10 @@ if st.button("🚀 Compare Live Data"):
                     st.divider()
         else:
             st.info(f"No moves found greater than {threshold}")
+            # Diagnostic helper if result is empty
+            st.markdown("---")
+            with st.expander("Diagnostic: Why am I seeing no results?"):
+                st.write(f"1. **Snapshot Count:** {len(compare_map)} markets")
+                st.write(f"2. **Live Count:** {len(live_flat)} markets")
+                st.write(f"3. **Threshold:** {threshold}")
+                st.write("If Snapshot/Live counts are high but results are 0, try lowering the threshold or clicking 'Force Refresh'.")
