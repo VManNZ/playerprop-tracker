@@ -63,8 +63,304 @@ def save_snapshot_to_drive(data):
         media = MediaIoBaseUpload(io.BytesIO(file_content.encode('utf-8')), mimetype='application/json')
         
         if file_id:
-            service.files().update(fileId=file_id, media_body=media).execute()
+            service.files().update(
+                fileId=file_id, 
+                media_body=media
+            ).execute()
             return f"Snapshot Updated ({timestamp})"
         else:
             file_metadata = {'name': SNAPSHOT_FILENAME, 'parents': [DRIVE_FOLDER_ID]}
-            service.files().create(body=file_metadata,
+            service.files().create(
+                body=file_metadata, 
+                media_body=media
+            ).execute()
+            return f"Snapshot Created ({timestamp})"
+    except Exception as e:
+        st.error(f"Drive Error: {e}")
+        return None
+
+@st.cache_data(ttl=300) 
+def load_snapshot_from_drive():
+    try:
+        service = get_drive_service()
+        file_id = get_snapshot_file_id(service)
+        if not file_id: return None, None
+        
+        request = service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while done is False: status, done = downloader.next_chunk()
+        fh.seek(0)
+        content = json.load(fh)
+        
+        if "data" in content:
+            return content.get("last_updated"), content.get("data")
+        elif "games" in content:
+            return content.get("last_updated"), {"props": content["games"], "totals": []}
+        else:
+            return "Unknown", {"props": content, "totals": []}
+            
+    except Exception as e:
+        st.error(f"Error loading Snapshot: {e}")
+        return None, None
+
+# --- 4. API FUNCTIONS ---
+
+@st.cache_data(ttl=3600)
+def get_active_games():
+    """Fetches currently active games."""
+    url = f'https://api.the-odds-api.com/v4/sports/{SPORT}/events'
+    params = {'apiKey': API_KEY}
+    try:
+        response = requests.get(url, params=params)
+        if 'x-requests-remaining' in response.headers:
+            st.session_state['api_remaining'] = response.headers['x-requests-remaining']
+        return response.json() if response.status_code == 200 else []
+    except:
+        return []
+
+def get_odds_for_game(game_id, markets):
+    """Fetches odds for a specific game and market."""
+    url = f'https://api.the-odds-api.com/v4/sports/{SPORT}/events/{game_id}/odds'
+    params = {
+        'apiKey': API_KEY,
+        'regions': 'us,eu',
+        'markets': markets,
+        'oddsFormat': 'decimal',
+        'bookmakers': TARGET_BOOKMAKER_KEY
+    }
+    try:
+        response = requests.get(url, params=params)
+        return response.json() if response.status_code == 200 else None
+    except:
+        return None
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_all_odds_cached(game_ids, mode="props"):
+    """Fetches odds for a list of games with 60s cache."""
+    all_data = []
+    market_string = ','.join(MARKET_ORDER) if mode == "props" else TOTALS_MARKET
+    
+    progress_bar = st.progress(0)
+    for i, game_id in enumerate(game_ids):
+        data = get_odds_for_game(game_id, market_string)
+        if data: all_data.append(data)
+        progress_bar.progress((i + 1) / len(game_ids))
+    progress_bar.empty()
+    return all_data
+
+# --- 5. DATA PROCESSING ---
+
+def flatten_data(game_data_list, is_totals=False):
+    flat_list = []
+    if not game_data_list: return flat_list
+    
+    for game in game_data_list:
+        home = game.get('home_team', 'Unknown')
+        away = game.get('away_team', 'Unknown')
+        matchup = f"{away} @ {home}"
+        
+        for book in game.get('bookmakers', []):
+            if book['key'] != TARGET_BOOKMAKER_KEY: continue
+            
+            for market in book.get('markets', []):
+                if is_totals and market['key'] != 'totals': continue
+                if not is_totals and market['key'] == 'totals': continue
+
+                for outcome in market.get('outcomes', []):
+                    if is_totals:
+                        if outcome['name'] == 'Over':
+                            over_price = outcome['price']
+                            under_outcome = next((o for o in market['outcomes'] if o['name'] == 'Under'), None)
+                            under_price = under_outcome['price'] if under_outcome else '-'
+                            flat_list.append({
+                                "unique_key": matchup,
+                                "matchup": matchup,
+                                "market_key": "totals",
+                                "line": outcome['point'],
+                                "over": over_price,
+                                "under": under_price
+                            })
+                    else:
+                        if outcome['name'] == 'Over':
+                            over_price = outcome['price']
+                            under_outcome = next((o for o in market['outcomes'] if o['name'] == 'Under'), None)
+                            under_price = under_outcome['price'] if under_outcome else '-'
+                            key = f"{outcome['description']}|{market['key']}"
+                            flat_list.append({
+                                "unique_key": key,
+                                "player": outcome['description'],
+                                "market_key": market['key'],
+                                "line": outcome['point'],
+                                "over": over_price,
+                                "under": under_price,
+                                "matchup": matchup
+                            })
+    return flat_list
+
+# --- 6. APP LAYOUT & STATE ---
+
+st.title("🏀 NBA Tracker (Stable)")
+
+# Initialize Session State
+if 'scan_results' not in st.session_state:
+    st.session_state['scan_results'] = None
+if 'scan_timestamp' not in st.session_state:
+    st.session_state['scan_timestamp'] = None
+if 'scan_mode' not in st.session_state:
+    st.session_state['scan_mode'] = None
+
+# Sidebar
+st.sidebar.header("Controls")
+hours_window = st.sidebar.slider("Scan games within (Hours)", 1, 48, 24)
+
+if st.sidebar.button("📸 Take Snapshot"):
+    get_active_games.clear()
+    fetch_all_odds_cached.clear()
+    with st.spinner("Fetching Fresh Data..."):
+        games = get_active_games()
+        valid_games = []
+        now = datetime.utcnow()
+        for g in games:
+            try:
+                commence = datetime.strptime(g['commence_time'], "%Y-%m-%dT%H:%M:%SZ")
+                if 0 <= (commence - now).total_seconds() / 3600 <= hours_window:
+                    valid_games.append(g)
+            except: pass
+
+        if valid_games:
+            game_ids = [g['id'] for g in valid_games]
+            st.toast(f"Snapshotting {len(game_ids)} games...", icon="📸")
+            props = fetch_all_odds_cached(game_ids, mode="props")
+            totals = fetch_all_odds_cached(game_ids, mode="totals")
+            payload = {"props": props, "totals": totals}
+            msg = save_snapshot_to_drive(payload)
+            st.sidebar.success(msg)
+            load_snapshot_from_drive.clear()
+            time.sleep(1)
+            st.rerun()
+        else:
+            st.error(f"No games found starting within {hours_window} hours.")
+
+if 'api_remaining' in st.session_state:
+    st.sidebar.write(f"Credits: **{st.session_state['api_remaining']}**")
+
+# Load Snapshot
+try:
+    snap_ts, snap_data = load_snapshot_from_drive()
+    if snap_ts:
+        st.sidebar.info(f"Snapshot: {snap_ts}")
+        props_snap = flatten_data(snap_data.get('props', []), is_totals=False)
+        totals_snap = flatten_data(snap_data.get('totals', []), is_totals=True)
+        props_map = {x['unique_key']: x for x in props_snap}
+        totals_map = {x['unique_key']: x for x in totals_snap}
+    else:
+        st.sidebar.warning("No Snapshot Found")
+        props_map, totals_map = {}, {}
+except:
+    props_map, totals_map = {}, {}
+
+# View Mode
+st.sidebar.markdown("---")
+mode = st.sidebar.radio("Mode", ["Player Props", "Game Totals"])
+threshold = 0
+
+if mode == "Player Props":
+    threshold = st.sidebar.slider("Min Diff (+/-)", 5.0, 20.0, 5.0, 0.5)
+else:
+    threshold = st.sidebar.slider("Min Diff (+/-)", 10.0, 30.0, 10.0, 0.5)
+
+# Main Buttons
+col1, col2 = st.columns([1, 4])
+with col1:
+    scan_btn = st.button("🚀 Compare Live Data")
+with col2:
+    if st.button("🔄 Force Refresh"):
+        fetch_all_odds_cached.clear()
+        st.session_state['scan_results'] = None
+        st.toast("Cache cleared! Click Compare.", icon="🔄")
+
+# Logic
+if scan_btn:
+    st.write("🔎 **Scanning Live Odds...**") # Immediate feedback
+    games = get_active_games()
+    valid_game_ids = []
+    now = datetime.utcnow()
+    for g in games:
+        try:
+            commence = datetime.strptime(g['commence_time'], "%Y-%m-%dT%H:%M:%SZ")
+            if 0 <= (commence - now).total_seconds() / 3600 <= hours_window:
+                valid_game_ids.append(g['id'])
+        except: pass
+    
+    if not valid_game_ids:
+        st.error(f"No active games found within {hours_window} hours.")
+        st.session_state['scan_results'] = []
+    else:
+        if mode == "Player Props":
+            live_raw = fetch_all_odds_cached(valid_game_ids, mode="props")
+            live_flat = flatten_data(live_raw, is_totals=False)
+            compare_map = props_map
+        else:
+            live_raw = fetch_all_odds_cached(valid_game_ids, mode="totals")
+            live_flat = flatten_data(live_raw, is_totals=True)
+            compare_map = totals_map
+            
+        results = []
+        for live_item in live_flat:
+            key = live_item['unique_key']
+            if key in compare_map:
+                pre_item = compare_map[key]
+                if live_item['line'] is not None and pre_item['line'] is not None:
+                    diff = live_item['line'] - pre_item['line']
+                    results.append({
+                        **live_item,
+                        "live_val": live_item['line'],
+                        "pre_val": pre_item['line'],
+                        "diff": diff
+                    })
+
+        st.session_state['scan_results'] = results
+        st.session_state['scan_timestamp'] = datetime.now().strftime("%H:%M:%S")
+        st.session_state['scan_mode'] = mode
+
+# --- DISPLAY LOGIC ---
+if st.session_state['scan_results'] is None:
+    st.info("👋 Click 'Compare Live Data' to start your scan.")
+else:
+    results_all = st.session_state['scan_results']
+    scan_ts = st.session_state['scan_timestamp']
+    saved_mode = st.session_state.get('scan_mode', mode)
+    
+    filtered_results = [r for r in results_all if abs(r['diff']) >= threshold]
+    
+    st.markdown("---")
+    st.subheader(f"📊 Results ({len(filtered_results)})")
+    st.caption(f"Last Scanned: {scan_ts} | Mode: {saved_mode} | Threshold: {threshold}")
+
+    if filtered_results:
+        filtered_results.sort(key=lambda x: abs(x['diff']), reverse=True)
+        for res in filtered_results:
+            with st.container():
+                c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+                if saved_mode == "Player Props":
+                    pretty_market = res['market_key'].replace('player_', '').replace('_', ' ').title()
+                    c1.markdown(f"**{res['player']}**")
+                    c1.write(f"🏟️ *{res['matchup']}*")
+                    c1.caption(f"{pretty_market}")
+                else:
+                    c1.markdown(f"**{res['matchup']}**")
+                    c1.caption("Total Points")
+                c2.metric("Live", res['live_val'], delta=f"{res['diff']:.1f}")
+                c3.metric("Pre", res['pre_val'])
+                c4.write(f"O: {res['over']} | U: {res['under']}")
+                st.divider()
+    else:
+        st.warning(f"No moves found >= {threshold}")
+        with st.expander("Debug Info"):
+            st.write(f"Total Markets Scanned: {len(results_all)}")
+            if len(results_all) > 0:
+                st.write("Top Movers (Any Threshold):")
+                sorted_raw = sorted(results_all, key=lambda x: abs(x['diff']), reverse=True)[:5]
+                st.write(sorted_raw)
