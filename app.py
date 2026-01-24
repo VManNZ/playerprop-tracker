@@ -13,7 +13,6 @@ st.set_page_config(page_title="NBA Tracker", page_icon="🏀", layout="wide")
 
 # --- 2. SETUP & AUTH ---
 try:
-    # Load secrets safely
     if "API_KEY" not in st.secrets:
         st.error("❌ Missing 'API_KEY' in secrets.toml")
         st.stop()
@@ -187,10 +186,14 @@ def flatten_data(game_data_list, is_totals=False):
                             over_price = outcome['price']
                             under_outcome = next((o for o in market['outcomes'] if o['name'] == 'Under'), None)
                             under_price = under_outcome['price'] if under_outcome else '-'
-                            key = f"{outcome['description']}|{market['key']}"
+                            
+                            # Clean player name to ensure matching (strip whitespace)
+                            clean_player = outcome['description'].strip()
+                            key = f"{clean_player}|{market['key']}"
+                            
                             flat_list.append({
                                 "unique_key": key,
-                                "player": outcome['description'],
+                                "player": clean_player,
                                 "market_key": market['key'],
                                 "line": outcome['point'],
                                 "over": over_price,
@@ -201,7 +204,7 @@ def flatten_data(game_data_list, is_totals=False):
 
 # --- 6. APP LAYOUT & STATE ---
 
-st.title("🏀 NBA Tracker (Stable)")
+st.title("🏀 NBA Tracker (Diagnose Mode)")
 
 # Initialize Session State
 if 'scan_results' not in st.session_state:
@@ -210,6 +213,8 @@ if 'scan_timestamp' not in st.session_state:
     st.session_state['scan_timestamp'] = None
 if 'scan_mode' not in st.session_state:
     st.session_state['scan_mode'] = None
+if 'debug_info' not in st.session_state:
+    st.session_state['debug_info'] = {}
 
 # Sidebar
 st.sidebar.header("Controls")
@@ -283,7 +288,7 @@ with col2:
 
 # Logic
 if scan_btn:
-    st.write("🔎 **Scanning Live Odds...**") # Immediate feedback
+    st.write("🔎 **Scanning Live Odds...**")
     games = get_active_games()
     valid_game_ids = []
     now = datetime.utcnow()
@@ -308,9 +313,13 @@ if scan_btn:
             compare_map = totals_map
             
         results = []
+        matched_keys = [] # Track what we actually matched
+        
         for live_item in live_flat:
             key = live_item['unique_key']
+            
             if key in compare_map:
+                matched_keys.append(key)
                 pre_item = compare_map[key]
                 if live_item['line'] is not None and pre_item['line'] is not None:
                     diff = live_item['line'] - pre_item['line']
@@ -324,6 +333,14 @@ if scan_btn:
         st.session_state['scan_results'] = results
         st.session_state['scan_timestamp'] = datetime.now().strftime("%H:%M:%S")
         st.session_state['scan_mode'] = mode
+        
+        # Save Debug Info to State
+        st.session_state['debug_info'] = {
+            "snapshot_count": len(compare_map),
+            "live_count": len(live_flat),
+            "matched_count": len(matched_keys),
+            "unmatched_live_sample": [item['unique_key'] for item in live_flat if item['unique_key'] not in compare_map][:5]
+        }
 
 # --- DISPLAY LOGIC ---
 if st.session_state['scan_results'] is None:
@@ -332,6 +349,7 @@ else:
     results_all = st.session_state['scan_results']
     scan_ts = st.session_state['scan_timestamp']
     saved_mode = st.session_state.get('scan_mode', mode)
+    debug_data = st.session_state.get('debug_info', {})
     
     filtered_results = [r for r in results_all if abs(r['diff']) >= threshold]
     
@@ -358,9 +376,15 @@ else:
                 st.divider()
     else:
         st.warning(f"No moves found >= {threshold}")
-        with st.expander("Debug Info"):
-            st.write(f"Total Markets Scanned: {len(results_all)}")
-            if len(results_all) > 0:
-                st.write("Top Movers (Any Threshold):")
-                sorted_raw = sorted(results_all, key=lambda x: abs(x['diff']), reverse=True)[:5]
-                st.write(sorted_raw)
+        
+    # --- DEBUG SECTION ---
+    with st.expander("🛠️ Diagnostics (Why are lines missing?)"):
+        st.write(f"**Snapshot Items:** {debug_data.get('snapshot_count', 0)}")
+        st.write(f"**Live Items Found:** {debug_data.get('live_count', 0)}")
+        st.write(f"**Items Successfully Matched:** {debug_data.get('matched_count', 0)}")
+        
+        if debug_data.get('matched_count', 0) == 0:
+            st.error("⚠️ ZERO items matched! This means the player names in Snapshot vs Live are different.")
+            
+        st.write("**Sample of Live items that did NOT match any Snapshot item:**")
+        st.write(debug_data.get('unmatched_live_sample', []))
