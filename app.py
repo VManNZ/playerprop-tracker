@@ -113,7 +113,6 @@ def get_active_games():
     params = {'apiKey': API_KEY}
     try:
         response = requests.get(url, params=params)
-        # Capture API credits remaining
         if 'x-requests-remaining' in response.headers:
             st.session_state['api_remaining'] = response.headers['x-requests-remaining']
         return response.json() if response.status_code == 200 else []
@@ -132,9 +131,6 @@ def get_odds_for_game(game_id, markets):
     }
     try:
         response = requests.get(url, params=params)
-        # Capture API credits remaining here too
-        if 'x-requests-remaining' in response.headers:
-            st.session_state['api_remaining'] = response.headers['x-requests-remaining']
         return response.json() if response.status_code == 200 else None
     except:
         return None
@@ -191,7 +187,7 @@ def flatten_data(game_data_list, is_totals=False):
                             under_outcome = next((o for o in market['outcomes'] if o['name'] == 'Under'), None)
                             under_price = under_outcome['price'] if under_outcome else '-'
                             
-                            # Clean player name to ensure matching (strip whitespace)
+                            # Clean player name
                             clean_player = outcome['description'].strip()
                             key = f"{clean_player}|{market['key']}"
                             
@@ -208,7 +204,7 @@ def flatten_data(game_data_list, is_totals=False):
 
 # --- 6. APP LAYOUT & STATE ---
 
-st.title("🏀 NBA Tracker (Diagnose Mode)")
+st.title("🏀 NBA Tracker (Live Fix)")
 
 # Initialize Session State
 if 'scan_results' not in st.session_state:
@@ -248,7 +244,9 @@ if st.sidebar.button("📸 Take Snapshot"):
         for g in games:
             try:
                 commence = datetime.strptime(g['commence_time'], "%Y-%m-%dT%H:%M:%SZ")
-                if 0 <= (commence - now).total_seconds() / 3600 <= hours_window:
+                # FIX: Allow negative diff (games that started up to 6 hours ago)
+                diff = (commence - now).total_seconds() / 3600
+                if -6 <= diff <= hours_window:
                     valid_games.append(g)
             except: pass
 
@@ -264,7 +262,7 @@ if st.sidebar.button("📸 Take Snapshot"):
             time.sleep(1)
             st.rerun()
         else:
-            st.error(f"No games found starting within {hours_window} hours.")
+            st.error(f"No games found within window (looking back 6h, forward {hours_window}h).")
 
 # Load Snapshot
 try:
@@ -307,15 +305,23 @@ if scan_btn:
     games = get_active_games()
     valid_game_ids = []
     now = datetime.utcnow()
+    
+    st.write(f"Found {len(games)} total games on API.")
+    
     for g in games:
         try:
             commence = datetime.strptime(g['commence_time'], "%Y-%m-%dT%H:%M:%SZ")
-            if 0 <= (commence - now).total_seconds() / 3600 <= hours_window:
+            diff = (commence - now).total_seconds() / 3600
+            
+            # FIX: We want games that STARTED (-6 hours) or WILL START (hours_window)
+            if -6 <= diff <= hours_window:
                 valid_game_ids.append(g['id'])
         except: pass
     
+    st.write(f"After time filter, keeping {len(valid_game_ids)} active/live games.")
+    
     if not valid_game_ids:
-        st.error(f"No active games found within {hours_window} hours.")
+        st.error(f"No active games found. (Looked 6h back, {hours_window}h forward)")
         st.session_state['scan_results'] = []
     else:
         if mode == "Player Props":
@@ -328,7 +334,7 @@ if scan_btn:
             compare_map = totals_map
             
         results = []
-        matched_keys = [] # Track what we actually matched
+        matched_keys = [] 
         
         for live_item in live_flat:
             key = live_item['unique_key']
@@ -393,7 +399,7 @@ else:
         st.warning(f"No moves found >= {threshold}")
         
     # --- DEBUG SECTION ---
-    with st.expander("🛠️ Diagnostics (Why are lines missing?)"):
+    with st.expander("🛠️ Diagnostics"):
         st.write(f"**Snapshot Items:** {debug_data.get('snapshot_count', 0)}")
         st.write(f"**Live Items Found:** {debug_data.get('live_count', 0)}")
         st.write(f"**Items Successfully Matched:** {debug_data.get('matched_count', 0)}")
