@@ -131,6 +131,8 @@ def get_odds_for_game(game_id, markets):
     }
     try:
         response = requests.get(url, params=params)
+        if 'x-requests-remaining' in response.headers:
+            st.session_state['api_remaining'] = response.headers['x-requests-remaining']
         return response.json() if response.status_code == 200 else None
     except:
         return None
@@ -139,6 +141,7 @@ def get_odds_for_game(game_id, markets):
 def fetch_all_odds_cached(game_ids, mode="props"):
     """Fetches odds for a list of games with 60s cache."""
     all_data = []
+    # Strict market selection based on mode
     market_string = ','.join(MARKET_ORDER) if mode == "props" else TOTALS_MARKET
     
     progress_bar = st.progress(0)
@@ -164,17 +167,19 @@ def flatten_data(game_data_list, is_totals=False):
             if book['key'] != TARGET_BOOKMAKER_KEY: continue
             
             for market in book.get('markets', []):
+                # Strict Filtering
                 if is_totals and market['key'] != 'totals': continue
                 if not is_totals and market['key'] == 'totals': continue
 
                 for outcome in market.get('outcomes', []):
                     if is_totals:
+                        # Logic for GAME TOTALS
                         if outcome['name'] == 'Over':
                             over_price = outcome['price']
                             under_outcome = next((o for o in market['outcomes'] if o['name'] == 'Under'), None)
                             under_price = under_outcome['price'] if under_outcome else '-'
                             flat_list.append({
-                                "unique_key": matchup,
+                                "unique_key": matchup, # For totals, one line per game usually
                                 "matchup": matchup,
                                 "market_key": "totals",
                                 "line": outcome['point'],
@@ -182,12 +187,12 @@ def flatten_data(game_data_list, is_totals=False):
                                 "under": under_price
                             })
                     else:
+                        # Logic for PLAYER PROPS
                         if outcome['name'] == 'Over':
                             over_price = outcome['price']
                             under_outcome = next((o for o in market['outcomes'] if o['name'] == 'Under'), None)
                             under_price = under_outcome['price'] if under_outcome else '-'
                             
-                            # Clean player name
                             clean_player = outcome['description'].strip()
                             key = f"{clean_player}|{market['key']}"
                             
@@ -204,7 +209,7 @@ def flatten_data(game_data_list, is_totals=False):
 
 # --- 6. APP LAYOUT & STATE ---
 
-st.title("🏀 NBA Tracker (Live Fix)")
+st.title("🏀 NBA Tracker (Final)")
 
 # Initialize Session State
 if 'scan_results' not in st.session_state:
@@ -213,24 +218,19 @@ if 'scan_timestamp' not in st.session_state:
     st.session_state['scan_timestamp'] = None
 if 'scan_mode' not in st.session_state:
     st.session_state['scan_mode'] = None
-if 'debug_info' not in st.session_state:
-    st.session_state['debug_info'] = {}
 
 # Sidebar
 st.sidebar.header("Controls")
 
-# --- API STATUS PANEL ---
+# --- API STATUS ---
 if 'api_remaining' in st.session_state:
     st.sidebar.markdown("### 📊 API Status")
     credits = int(st.session_state['api_remaining'])
     if credits > 50:
         st.sidebar.success(f"Credits Left: **{credits}**")
-    elif credits > 10:
-        st.sidebar.warning(f"Credits Left: **{credits}**")
     else:
-        st.sidebar.error(f"Credits Left: **{credits}**")
+        st.sidebar.warning(f"Credits Left: **{credits}**")
     st.sidebar.markdown("---")
-# ------------------------
 
 hours_window = st.sidebar.slider("Scan games within (Hours)", 1, 48, 24)
 
@@ -244,7 +244,7 @@ if st.sidebar.button("📸 Take Snapshot"):
         for g in games:
             try:
                 commence = datetime.strptime(g['commence_time'], "%Y-%m-%dT%H:%M:%SZ")
-                # FIX: Allow negative diff (games that started up to 6 hours ago)
+                # Games starting within -6h to +window
                 diff = (commence - now).total_seconds() / 3600
                 if -6 <= diff <= hours_window:
                     valid_games.append(g)
@@ -262,7 +262,7 @@ if st.sidebar.button("📸 Take Snapshot"):
             time.sleep(1)
             st.rerun()
         else:
-            st.error(f"No games found within window (looking back 6h, forward {hours_window}h).")
+            st.error("No valid games found for snapshot.")
 
 # Load Snapshot
 try:
@@ -282,12 +282,19 @@ except:
 # View Mode
 st.sidebar.markdown("---")
 mode = st.sidebar.radio("Mode", ["Player Props", "Game Totals"])
-threshold = 0
 
+# --- AUTO-CLEAR RESULTS ON MODE SWITCH ---
+if st.session_state['scan_mode'] and st.session_state['scan_mode'] != mode:
+    st.session_state['scan_results'] = None
+    st.session_state['scan_mode'] = None
+    st.rerun()
+
+threshold = 0
 if mode == "Player Props":
     threshold = st.sidebar.slider("Min Diff (+/-)", 5.0, 20.0, 5.0, 0.5)
 else:
-    threshold = st.sidebar.slider("Min Diff (+/-)", 10.0, 30.0, 10.0, 0.5)
+    # Game Totals Default 10.0
+    threshold = st.sidebar.slider("Min Diff (+/-)", 5.0, 30.0, 10.0, 0.5)
 
 # Main Buttons
 col1, col2 = st.columns([1, 4])
@@ -297,31 +304,25 @@ with col2:
     if st.button("🔄 Force Refresh"):
         fetch_all_odds_cached.clear()
         st.session_state['scan_results'] = None
-        st.toast("Cache cleared! Click Compare.", icon="🔄")
+        st.toast("Cache cleared!", icon="🔄")
 
 # Logic
 if scan_btn:
-    st.write("🔎 **Scanning Live Odds...**")
+    st.write(f"🔎 **Scanning ({mode})...**")
     games = get_active_games()
     valid_game_ids = []
     now = datetime.utcnow()
-    
-    st.write(f"Found {len(games)} total games on API.")
     
     for g in games:
         try:
             commence = datetime.strptime(g['commence_time'], "%Y-%m-%dT%H:%M:%SZ")
             diff = (commence - now).total_seconds() / 3600
-            
-            # FIX: We want games that STARTED (-6 hours) or WILL START (hours_window)
             if -6 <= diff <= hours_window:
                 valid_game_ids.append(g['id'])
         except: pass
     
-    st.write(f"After time filter, keeping {len(valid_game_ids)} active/live games.")
-    
     if not valid_game_ids:
-        st.error(f"No active games found. (Looked 6h back, {hours_window}h forward)")
+        st.error(f"No active games found.")
         st.session_state['scan_results'] = []
     else:
         if mode == "Player Props":
@@ -334,13 +335,11 @@ if scan_btn:
             compare_map = totals_map
             
         results = []
-        matched_keys = [] 
         
         for live_item in live_flat:
             key = live_item['unique_key']
             
             if key in compare_map:
-                matched_keys.append(key)
                 pre_item = compare_map[key]
                 if live_item['line'] is not None and pre_item['line'] is not None:
                     diff = live_item['line'] - pre_item['line']
@@ -354,23 +353,14 @@ if scan_btn:
         st.session_state['scan_results'] = results
         st.session_state['scan_timestamp'] = datetime.now().strftime("%H:%M:%S")
         st.session_state['scan_mode'] = mode
-        
-        # Save Debug Info to State
-        st.session_state['debug_info'] = {
-            "snapshot_count": len(compare_map),
-            "live_count": len(live_flat),
-            "matched_count": len(matched_keys),
-            "unmatched_live_sample": [item['unique_key'] for item in live_flat if item['unique_key'] not in compare_map][:5]
-        }
 
 # --- DISPLAY LOGIC ---
 if st.session_state['scan_results'] is None:
-    st.info("👋 Click 'Compare Live Data' to start your scan.")
+    st.info(f"👋 Select '{mode}' and click 'Compare Live Data'.")
 else:
     results_all = st.session_state['scan_results']
     scan_ts = st.session_state['scan_timestamp']
     saved_mode = st.session_state.get('scan_mode', mode)
-    debug_data = st.session_state.get('debug_info', {})
     
     filtered_results = [r for r in results_all if abs(r['diff']) >= threshold]
     
@@ -379,33 +369,32 @@ else:
     st.caption(f"Last Scanned: {scan_ts} | Mode: {saved_mode} | Threshold: {threshold}")
 
     if filtered_results:
-        filtered_results.sort(key=lambda x: abs(x['diff']), reverse=True)
+        # Sort by actual diff (Positive to Negative)
+        filtered_results.sort(key=lambda x: x['diff'], reverse=True)
+        
         for res in filtered_results:
             with st.container():
                 c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+                
                 if saved_mode == "Player Props":
                     pretty_market = res['market_key'].replace('player_', '').replace('_', ' ').title()
                     c1.markdown(f"**{res['player']}**")
                     c1.write(f"🏟️ *{res['matchup']}*")
                     c1.caption(f"{pretty_market}")
                 else:
+                    # Totals Display
                     c1.markdown(f"**{res['matchup']}**")
-                    c1.caption("Total Points")
+                    c1.caption("🏀 Game Total")
+                
                 c2.metric("Live", res['live_val'], delta=f"{res['diff']:.1f}")
                 c3.metric("Pre", res['pre_val'])
                 c4.write(f"O: {res['over']} | U: {res['under']}")
                 st.divider()
     else:
         st.warning(f"No moves found >= {threshold}")
-        
-    # --- DEBUG SECTION ---
-    with st.expander("🛠️ Diagnostics"):
-        st.write(f"**Snapshot Items:** {debug_data.get('snapshot_count', 0)}")
-        st.write(f"**Live Items Found:** {debug_data.get('live_count', 0)}")
-        st.write(f"**Items Successfully Matched:** {debug_data.get('matched_count', 0)}")
-        
-        if debug_data.get('matched_count', 0) == 0:
-            st.error("⚠️ ZERO items matched! This means the player names in Snapshot vs Live are different.")
-            
-        st.write("**Sample of Live items that did NOT match any Snapshot item:**")
-        st.write(debug_data.get('unmatched_live_sample', []))
+        with st.expander("Diagnostics"):
+            st.write(f"Total Scanned: {len(results_all)}")
+            if len(results_all) > 0:
+                st.write("Top Movers (Any Threshold):")
+                sorted_raw = sorted(results_all, key=lambda x: abs(x['diff']), reverse=True)[:5]
+                st.write(sorted_raw)
