@@ -113,6 +113,7 @@ def get_active_games():
     params = {'apiKey': API_KEY}
     try:
         response = requests.get(url, params=params)
+        # Capture API credits remaining
         if 'x-requests-remaining' in response.headers:
             st.session_state['api_remaining'] = response.headers['x-requests-remaining']
         return response.json() if response.status_code == 200 else []
@@ -131,6 +132,9 @@ def get_odds_for_game(game_id, markets):
     }
     try:
         response = requests.get(url, params=params)
+        # Capture API credits remaining here too
+        if 'x-requests-remaining' in response.headers:
+            st.session_state['api_remaining'] = response.headers['x-requests-remaining']
         return response.json() if response.status_code == 200 else None
     except:
         return None
@@ -218,6 +222,20 @@ if 'debug_info' not in st.session_state:
 
 # Sidebar
 st.sidebar.header("Controls")
+
+# --- API STATUS PANEL ---
+if 'api_remaining' in st.session_state:
+    st.sidebar.markdown("### 📊 API Status")
+    credits = int(st.session_state['api_remaining'])
+    if credits > 50:
+        st.sidebar.success(f"Credits Left: **{credits}**")
+    elif credits > 10:
+        st.sidebar.warning(f"Credits Left: **{credits}**")
+    else:
+        st.sidebar.error(f"Credits Left: **{credits}**")
+    st.sidebar.markdown("---")
+# ------------------------
+
 hours_window = st.sidebar.slider("Scan games within (Hours)", 1, 48, 24)
 
 if st.sidebar.button("📸 Take Snapshot"):
@@ -247,9 +265,6 @@ if st.sidebar.button("📸 Take Snapshot"):
             st.rerun()
         else:
             st.error(f"No games found starting within {hours_window} hours.")
-
-if 'api_remaining' in st.session_state:
-    st.sidebar.write(f"Credits: **{st.session_state['api_remaining']}**")
 
 # Load Snapshot
 try:
