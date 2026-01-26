@@ -3,6 +3,7 @@ import requests
 import json
 import io
 import time
+import pandas as pd
 from datetime import datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -141,7 +142,6 @@ def get_odds_for_game(game_id, markets):
 def fetch_all_odds_cached(game_ids, mode="props"):
     """Fetches odds for a list of games with 60s cache."""
     all_data = []
-    # Strict market selection based on mode
     market_string = ','.join(MARKET_ORDER) if mode == "props" else TOTALS_MARKET
     
     progress_bar = st.progress(0)
@@ -167,19 +167,17 @@ def flatten_data(game_data_list, is_totals=False):
             if book['key'] != TARGET_BOOKMAKER_KEY: continue
             
             for market in book.get('markets', []):
-                # Strict Filtering
                 if is_totals and market['key'] != 'totals': continue
                 if not is_totals and market['key'] == 'totals': continue
 
                 for outcome in market.get('outcomes', []):
                     if is_totals:
-                        # Logic for GAME TOTALS
                         if outcome['name'] == 'Over':
                             over_price = outcome['price']
                             under_outcome = next((o for o in market['outcomes'] if o['name'] == 'Under'), None)
                             under_price = under_outcome['price'] if under_outcome else '-'
                             flat_list.append({
-                                "unique_key": matchup, # For totals, one line per game usually
+                                "unique_key": matchup, 
                                 "matchup": matchup,
                                 "market_key": "totals",
                                 "line": outcome['point'],
@@ -187,7 +185,6 @@ def flatten_data(game_data_list, is_totals=False):
                                 "under": under_price
                             })
                     else:
-                        # Logic for PLAYER PROPS
                         if outcome['name'] == 'Over':
                             over_price = outcome['price']
                             under_outcome = next((o for o in market['outcomes'] if o['name'] == 'Under'), None)
@@ -209,7 +206,7 @@ def flatten_data(game_data_list, is_totals=False):
 
 # --- 6. APP LAYOUT & STATE ---
 
-st.title("🏀 NBA Tracker (Final)")
+st.title("🏀 NBA Tracker (Table View)")
 
 # Initialize Session State
 if 'scan_results' not in st.session_state:
@@ -244,7 +241,6 @@ if st.sidebar.button("📸 Take Snapshot"):
         for g in games:
             try:
                 commence = datetime.strptime(g['commence_time'], "%Y-%m-%dT%H:%M:%SZ")
-                # Games starting within -6h to +window
                 diff = (commence - now).total_seconds() / 3600
                 if -6 <= diff <= hours_window:
                     valid_games.append(g)
@@ -283,7 +279,7 @@ except:
 st.sidebar.markdown("---")
 mode = st.sidebar.radio("Mode", ["Player Props", "Game Totals"])
 
-# --- AUTO-CLEAR RESULTS ON MODE SWITCH ---
+# Auto-Clear Results on Mode Switch
 if st.session_state['scan_mode'] and st.session_state['scan_mode'] != mode:
     st.session_state['scan_results'] = None
     st.session_state['scan_mode'] = None
@@ -293,8 +289,8 @@ threshold = 0
 if mode == "Player Props":
     threshold = st.sidebar.slider("Min Diff (+/-)", 5.0, 20.0, 5.0, 0.5)
 else:
-    # Game Totals Default 10.0
-    threshold = st.sidebar.slider("Min Diff (+/-)", 5.0, 30.0, 10.0, 0.5)
+    # No slider needed for Game Totals as per request
+    st.sidebar.info("Showing all live games for Totals.")
 
 # Main Buttons
 col1, col2 = st.columns([1, 4])
@@ -325,30 +321,42 @@ if scan_btn:
         st.error(f"No active games found.")
         st.session_state['scan_results'] = []
     else:
+        results = []
         if mode == "Player Props":
             live_raw = fetch_all_odds_cached(valid_game_ids, mode="props")
             live_flat = flatten_data(live_raw, is_totals=False)
             compare_map = props_map
+            
+            for live_item in live_flat:
+                key = live_item['unique_key']
+                if key in compare_map:
+                    pre_item = compare_map[key]
+                    if live_item['line'] is not None and pre_item['line'] is not None:
+                        diff = live_item['line'] - pre_item['line']
+                        results.append({
+                            **live_item,
+                            "live_val": live_item['line'],
+                            "pre_val": pre_item['line'],
+                            "diff": diff
+                        })
         else:
+            # GAME TOTALS LOGIC
             live_raw = fetch_all_odds_cached(valid_game_ids, mode="totals")
             live_flat = flatten_data(live_raw, is_totals=True)
             compare_map = totals_map
             
-        results = []
-        
-        for live_item in live_flat:
-            key = live_item['unique_key']
-            
-            if key in compare_map:
-                pre_item = compare_map[key]
-                if live_item['line'] is not None and pre_item['line'] is not None:
-                    diff = live_item['line'] - pre_item['line']
-                    results.append({
-                        **live_item,
-                        "live_val": live_item['line'],
-                        "pre_val": pre_item['line'],
-                        "diff": diff
-                    })
+            for live_item in live_flat:
+                key = live_item['unique_key']
+                if key in compare_map:
+                    pre_item = compare_map[key]
+                    if live_item['line'] is not None and pre_item['line'] is not None:
+                        diff = live_item['line'] - pre_item['line']
+                        results.append({
+                            "Matchup": live_item['matchup'],
+                            "Live Total": live_item['line'],
+                            "Pre Total": pre_item['line'],
+                            "Diff": diff
+                        })
 
         st.session_state['scan_results'] = results
         st.session_state['scan_timestamp'] = datetime.now().strftime("%H:%M:%S")
@@ -362,39 +370,46 @@ else:
     scan_ts = st.session_state['scan_timestamp']
     saved_mode = st.session_state.get('scan_mode', mode)
     
-    filtered_results = [r for r in results_all if abs(r['diff']) >= threshold]
-    
     st.markdown("---")
-    st.subheader(f"📊 Results ({len(filtered_results)})")
-    st.caption(f"Last Scanned: {scan_ts} | Mode: {saved_mode} | Threshold: {threshold}")
+    st.subheader(f"📊 Results ({len(results_all)})")
+    st.caption(f"Last Scanned: {scan_ts} | Mode: {saved_mode}")
 
-    if filtered_results:
-        # Sort by actual diff (Positive to Negative)
-        filtered_results.sort(key=lambda x: x['diff'], reverse=True)
+    if saved_mode == "Game Totals":
+        # TABLE VIEW FOR TOTALS
+        if results_all:
+            df = pd.DataFrame(results_all)
+            # Sort by absolute diff magnitude
+            df = df.sort_values(by="Diff", ascending=False, key=abs)
+            
+            # Format columns
+            st.dataframe(
+                df.style.format({
+                    "Live Total": "{:.1f}",
+                    "Pre Total": "{:.1f}",
+                    "Diff": "{:+.1f}"
+                }).background_gradient(subset=["Diff"], cmap="RdYlGn", vmin=-15, vmax=15),
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.warning("No Game Totals data found.")
+
+    else:
+        # PLAYER PROPS VIEW (With Slider)
+        filtered_results = [r for r in results_all if abs(r['diff']) >= threshold]
         
-        for res in filtered_results:
-            with st.container():
-                c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
-                
-                if saved_mode == "Player Props":
+        if filtered_results:
+            filtered_results.sort(key=lambda x: x['diff'], reverse=True)
+            for res in filtered_results:
+                with st.container():
+                    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
                     pretty_market = res['market_key'].replace('player_', '').replace('_', ' ').title()
                     c1.markdown(f"**{res['player']}**")
                     c1.write(f"🏟️ *{res['matchup']}*")
                     c1.caption(f"{pretty_market}")
-                else:
-                    # Totals Display
-                    c1.markdown(f"**{res['matchup']}**")
-                    c1.caption("🏀 Game Total")
-                
-                c2.metric("Live", res['live_val'], delta=f"{res['diff']:.1f}")
-                c3.metric("Pre", res['pre_val'])
-                c4.write(f"O: {res['over']} | U: {res['under']}")
-                st.divider()
-    else:
-        st.warning(f"No moves found >= {threshold}")
-        with st.expander("Diagnostics"):
-            st.write(f"Total Scanned: {len(results_all)}")
-            if len(results_all) > 0:
-                st.write("Top Movers (Any Threshold):")
-                sorted_raw = sorted(results_all, key=lambda x: abs(x['diff']), reverse=True)[:5]
-                st.write(sorted_raw)
+                    c2.metric("Live", res['live_val'], delta=f"{res['diff']:.1f}")
+                    c3.metric("Pre", res['pre_val'])
+                    c4.write(f"O: {res['over']} | U: {res['under']}")
+                    st.divider()
+        else:
+            st.warning(f"No player props moves found >= {threshold}")
