@@ -167,11 +167,13 @@ def flatten_data(game_data_list, is_totals=False):
             if book['key'] != TARGET_BOOKMAKER_KEY: continue
             
             for market in book.get('markets', []):
+                # Strict Filtering
                 if is_totals and market['key'] != 'totals': continue
                 if not is_totals and market['key'] == 'totals': continue
 
                 for outcome in market.get('outcomes', []):
                     if is_totals:
+                        # Logic for GAME TOTALS
                         if outcome['name'] == 'Over':
                             over_price = outcome['price']
                             under_outcome = next((o for o in market['outcomes'] if o['name'] == 'Under'), None)
@@ -185,6 +187,7 @@ def flatten_data(game_data_list, is_totals=False):
                                 "under": under_price
                             })
                     else:
+                        # Logic for PLAYER PROPS
                         if outcome['name'] == 'Over':
                             over_price = outcome['price']
                             under_outcome = next((o for o in market['outcomes'] if o['name'] == 'Under'), None)
@@ -206,7 +209,7 @@ def flatten_data(game_data_list, is_totals=False):
 
 # --- 6. APP LAYOUT & STATE ---
 
-st.title("🏀 NBA Tracker (Table View)")
+st.title("🏀 NBA Tracker (Final Table Fix)")
 
 # Initialize Session State
 if 'scan_results' not in st.session_state:
@@ -375,19 +378,19 @@ else:
     st.caption(f"Last Scanned: {scan_ts} | Mode: {saved_mode}")
 
     if saved_mode == "Game Totals":
-        # TABLE VIEW FOR TOTALS
+        # TABLE VIEW FOR TOTALS (No Matplotlib dependency)
         if results_all:
             df = pd.DataFrame(results_all)
             # Sort by absolute diff magnitude
             df = df.sort_values(by="Diff", ascending=False, key=abs)
             
-            # Format columns
+            # Simple formatting without gradients to prevent crashes
             st.dataframe(
                 df.style.format({
                     "Live Total": "{:.1f}",
                     "Pre Total": "{:.1f}",
                     "Diff": "{:+.1f}"
-                }).background_gradient(subset=["Diff"], cmap="RdYlGn", vmin=-15, vmax=15),
+                }),
                 use_container_width=True,
                 hide_index=True
             )
