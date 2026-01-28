@@ -105,11 +105,11 @@ def load_snapshot_from_drive():
         st.error(f"Error loading Snapshot: {e}")
         return None, None
 
-# --- 4. API FUNCTIONS ---
+# --- 4. API FUNCTIONS (Optimized) ---
 
 @st.cache_data(ttl=3600)
 def get_active_games():
-    """Fetches currently active games."""
+    """Fetches currently active games. Cached for 1 hour."""
     url = f'https://api.the-odds-api.com/v4/sports/{SPORT}/events'
     params = {'apiKey': API_KEY}
     try:
@@ -120,8 +120,11 @@ def get_active_games():
     except:
         return []
 
+# OPTIMIZATION: Cache individual game fetches for 120s
+# This ensures that if the list of games changes slightly, we don't re-fetch unchanged games.
+@st.cache_data(ttl=120)
 def get_odds_for_game(game_id, markets):
-    """Fetches odds for a specific game and market."""
+    """Fetches odds for a specific game. Cached for 120 seconds."""
     url = f'https://api.the-odds-api.com/v4/sports/{SPORT}/events/{game_id}/odds'
     params = {
         'apiKey': API_KEY,
@@ -138,9 +141,10 @@ def get_odds_for_game(game_id, markets):
     except:
         return None
 
-@st.cache_data(ttl=60, show_spinner=False)
+# OPTIMIZATION: Increased TTL to 120s
+@st.cache_data(ttl=120, show_spinner=False)
 def fetch_all_odds_cached(game_ids, mode="props"):
-    """Fetches odds for a list of games with 60s cache."""
+    """Batch fetcher. Uses cached individual calls internally."""
     all_data = []
     market_string = ','.join(MARKET_ORDER) if mode == "props" else TOTALS_MARKET
     
@@ -209,7 +213,7 @@ def flatten_data(game_data_list, is_totals=False):
 
 # --- 6. APP LAYOUT & STATE ---
 
-st.title("🏀 NBA Tracker (Final Table Fix)")
+st.title("🏀 NBA Tracker (Optimized)")
 
 # Initialize Session State
 if 'scan_results' not in st.session_state:
@@ -232,11 +236,14 @@ if 'api_remaining' in st.session_state:
         st.sidebar.warning(f"Credits Left: **{credits}**")
     st.sidebar.markdown("---")
 
-hours_window = st.sidebar.slider("Scan games within (Hours)", 1, 48, 24)
+# OPTIMIZATION: Reduced range to 12h, default 8h to focus on immediate games
+hours_window = st.sidebar.slider("Scan games within (Hours)", 1, 12, 8)
 
 if st.sidebar.button("📸 Take Snapshot"):
     get_active_games.clear()
     fetch_all_odds_cached.clear()
+    get_odds_for_game.clear() # Clear individual cache too
+    
     with st.spinner("Fetching Fresh Data..."):
         games = get_active_games()
         valid_games = []
@@ -244,8 +251,9 @@ if st.sidebar.button("📸 Take Snapshot"):
         for g in games:
             try:
                 commence = datetime.strptime(g['commence_time'], "%Y-%m-%dT%H:%M:%SZ")
+                # OPTIMIZATION: Reduced lookback to -4h to avoid finished games
                 diff = (commence - now).total_seconds() / 3600
-                if -6 <= diff <= hours_window:
+                if -4 <= diff <= hours_window:
                     valid_games.append(g)
             except: pass
 
@@ -290,9 +298,10 @@ if st.session_state['scan_mode'] and st.session_state['scan_mode'] != mode:
 
 threshold = 0
 if mode == "Player Props":
-    threshold = st.sidebar.slider("Min Diff (+/-)", 5.0, 20.0, 5.0, 0.5)
+    # UPDATE: Min 9.0, Default 10.0
+    threshold = st.sidebar.slider("Min Diff (+/-)", 9.0, 20.0, 10.0, 0.5)
 else:
-    # No slider needed for Game Totals as per request
+    # No slider needed for Game Totals
     st.sidebar.info("Showing all live games for Totals.")
 
 # Main Buttons
@@ -302,6 +311,7 @@ with col1:
 with col2:
     if st.button("🔄 Force Refresh"):
         fetch_all_odds_cached.clear()
+        get_odds_for_game.clear() # Clear granular cache
         st.session_state['scan_results'] = None
         st.toast("Cache cleared!", icon="🔄")
 
@@ -316,7 +326,8 @@ if scan_btn:
         try:
             commence = datetime.strptime(g['commence_time'], "%Y-%m-%dT%H:%M:%SZ")
             diff = (commence - now).total_seconds() / 3600
-            if -6 <= diff <= hours_window:
+            # OPTIMIZATION: Lookback limited to 4 hours for live games
+            if -4 <= diff <= hours_window:
                 valid_game_ids.append(g['id'])
         except: pass
     
@@ -378,27 +389,28 @@ else:
     st.caption(f"Last Scanned: {scan_ts} | Mode: {saved_mode}")
 
     if saved_mode == "Game Totals":
-        # TABLE VIEW FOR TOTALS (No Matplotlib dependency)
+        # TABLE VIEW FOR TOTALS
         if results_all:
             df = pd.DataFrame(results_all)
-            # Sort by absolute diff magnitude
-            df = df.sort_values(by="Diff", ascending=False, key=abs)
-            
-            # Simple formatting without gradients to prevent crashes
-            st.dataframe(
-                df.style.format({
-                    "Live Total": "{:.1f}",
-                    "Pre Total": "{:.1f}",
-                    "Diff": "{:+.1f}"
-                }),
-                use_container_width=True,
-                hide_index=True
-            )
+            if not df.empty:
+                df = df.sort_values(by="Diff", ascending=False, key=abs)
+                
+                st.dataframe(
+                    df.style.format({
+                        "Live Total": "{:.1f}",
+                        "Pre Total": "{:.1f}",
+                        "Diff": "{:+.1f}"
+                    }),
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.warning("No valid game totals found in live data.")
         else:
             st.warning("No Game Totals data found.")
 
     else:
-        # PLAYER PROPS VIEW (With Slider)
+        # PLAYER PROPS VIEW
         filtered_results = [r for r in results_all if abs(r['diff']) >= threshold]
         
         if filtered_results:
