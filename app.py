@@ -120,8 +120,6 @@ def get_active_games():
     except:
         return []
 
-# OPTIMIZATION: Cache individual game fetches for 120s
-# This ensures that if the list of games changes slightly, we don't re-fetch unchanged games.
 @st.cache_data(ttl=120)
 def get_odds_for_game(game_id, markets):
     """Fetches odds for a specific game. Cached for 120 seconds."""
@@ -141,7 +139,6 @@ def get_odds_for_game(game_id, markets):
     except:
         return None
 
-# OPTIMIZATION: Increased TTL to 120s
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_all_odds_cached(game_ids, mode="props"):
     """Batch fetcher. Uses cached individual calls internally."""
@@ -213,7 +210,7 @@ def flatten_data(game_data_list, is_totals=False):
 
 # --- 6. APP LAYOUT & STATE ---
 
-st.title("🏀 NBA Tracker (Optimized)")
+st.title("🏀 NBA Tracker (Watchlist)")
 
 # Initialize Session State
 if 'scan_results' not in st.session_state:
@@ -222,6 +219,9 @@ if 'scan_timestamp' not in st.session_state:
     st.session_state['scan_timestamp'] = None
 if 'scan_mode' not in st.session_state:
     st.session_state['scan_mode'] = None
+# Watchlist State
+if 'watchlist_totals' not in st.session_state:
+    st.session_state['watchlist_totals'] = []
 
 # Sidebar
 st.sidebar.header("Controls")
@@ -236,13 +236,12 @@ if 'api_remaining' in st.session_state:
         st.sidebar.warning(f"Credits Left: **{credits}**")
     st.sidebar.markdown("---")
 
-# OPTIMIZATION: Reduced range to 12h, default 8h to focus on immediate games
 hours_window = st.sidebar.slider("Scan games within (Hours)", 1, 12, 8)
 
 if st.sidebar.button("📸 Take Snapshot"):
     get_active_games.clear()
     fetch_all_odds_cached.clear()
-    get_odds_for_game.clear() # Clear individual cache too
+    get_odds_for_game.clear() 
     
     with st.spinner("Fetching Fresh Data..."):
         games = get_active_games()
@@ -251,7 +250,6 @@ if st.sidebar.button("📸 Take Snapshot"):
         for g in games:
             try:
                 commence = datetime.strptime(g['commence_time'], "%Y-%m-%dT%H:%M:%SZ")
-                # OPTIMIZATION: Reduced lookback to -4h to avoid finished games
                 diff = (commence - now).total_seconds() / 3600
                 if -4 <= diff <= hours_window:
                     valid_games.append(g)
@@ -298,11 +296,9 @@ if st.session_state['scan_mode'] and st.session_state['scan_mode'] != mode:
 
 threshold = 0
 if mode == "Player Props":
-    # UPDATE: Min 9.0, Default 10.0
     threshold = st.sidebar.slider("Min Diff (+/-)", 9.0, 20.0, 10.0, 0.5)
 else:
-    # No slider needed for Game Totals
-    st.sidebar.info("Showing all live games for Totals.")
+    st.sidebar.info("Use the Dropdown in the main view to track specific games.")
 
 # Main Buttons
 col1, col2 = st.columns([1, 4])
@@ -311,7 +307,7 @@ with col1:
 with col2:
     if st.button("🔄 Force Refresh"):
         fetch_all_odds_cached.clear()
-        get_odds_for_game.clear() # Clear granular cache
+        get_odds_for_game.clear()
         st.session_state['scan_results'] = None
         st.toast("Cache cleared!", icon="🔄")
 
@@ -326,7 +322,6 @@ if scan_btn:
         try:
             commence = datetime.strptime(g['commence_time'], "%Y-%m-%dT%H:%M:%SZ")
             diff = (commence - now).total_seconds() / 3600
-            # OPTIMIZATION: Lookback limited to 4 hours for live games
             if -4 <= diff <= hours_window:
                 valid_game_ids.append(g['id'])
         except: pass
@@ -389,14 +384,52 @@ else:
     st.caption(f"Last Scanned: {scan_ts} | Mode: {saved_mode}")
 
     if saved_mode == "Game Totals":
-        # TABLE VIEW FOR TOTALS
         if results_all:
-            df = pd.DataFrame(results_all)
-            if not df.empty:
-                df = df.sort_values(by="Diff", ascending=False, key=abs)
+            # --- WATCHLIST FEATURE ---
+            # 1. Get all unique matchups to populate dropdown
+            all_matchups = sorted(list(set([r['Matchup'] for r in results_all])))
+            
+            # 2. Multiselect for Watchlist
+            selected_games = st.multiselect(
+                "📝 Track Games (Watched games appear at the top):",
+                options=all_matchups,
+                default=st.session_state['watchlist_totals'],
+                key='watchlist_widget'
+            )
+            # Update session state with selection
+            st.session_state['watchlist_totals'] = selected_games
+
+            # 3. Process Data for Table
+            table_data = []
+            for r in results_all:
+                is_watched = r['Matchup'] in selected_games
                 
+                # Add visual indicator to Matchup name
+                display_matchup = f"⭐ {r['Matchup']}" if is_watched else r['Matchup']
+                
+                table_data.append({
+                    "Matchup": display_matchup,
+                    "Live Total": r['Live Total'],
+                    "Pre Total": r['Pre Total'],
+                    "Diff": r['Diff'],
+                    "IsWatched": is_watched, # Helper for sorting
+                    "AbsDiff": abs(r['Diff']) # Helper for sorting
+                })
+
+            df = pd.DataFrame(table_data)
+            
+            # 4. Sorting Logic: Watched First, then by Magnitude of Diff
+            if not df.empty:
+                df = df.sort_values(
+                    by=["IsWatched", "AbsDiff"], 
+                    ascending=[False, False]
+                )
+                
+                # Drop helper columns before display
+                df_display = df.drop(columns=["IsWatched", "AbsDiff"])
+
                 st.dataframe(
-                    df.style.format({
+                    df_display.style.format({
                         "Live Total": "{:.1f}",
                         "Pre Total": "{:.1f}",
                         "Diff": "{:+.1f}"
